@@ -12,6 +12,7 @@
 #include "file.h"
 #include "stat.h"
 #include "proc.h"
+#include "sysinfo.h"
 
 struct devsw devsw[NDEV];
 struct {
@@ -180,3 +181,40 @@ filewrite(struct file *f, uint64 addr, int n)
   return ret;
 }
 
+
+// ---------------------------------------------------------------------------
+// [BAN TAM - PHAN NGUOI 2] chi de nguoi 3 build va test; thay bang ban cua nguoi 2.
+// ---------------------------------------------------------------------------
+
+// ID cua mot open-file object = chi so cua no trong ftable.file[].
+// Chi la phep tinh con tro nen khong can lock.
+int
+fileslot(struct file *f)
+{
+  if(f < ftable.file || f >= ftable.file + NFILE)
+    return -1;
+  return f - ftable.file;
+}
+
+// Chup cac file co ref > 0 vao out[0..max-1]; tra ve so file.
+int
+filesinfo_collect(struct fileinfo *out, int max)
+{
+  int n = 0;
+
+  acquire(&ftable.lock);
+  for(int i = 0; i < NFILE && n < max; i++){
+    struct file *f = &ftable.file[i];
+    if(f->ref > 0){
+      out[n].slot = i;
+      out[n].type = f->type;
+      out[n].readable = f->readable;
+      out[n].writable = f->writable;
+      out[n].ref = f->ref;
+      out[n].npids = 0;
+      n++;
+    }
+  }
+  release(&ftable.lock);
+  return n;
+}
