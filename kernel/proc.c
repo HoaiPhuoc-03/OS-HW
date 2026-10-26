@@ -5,6 +5,15 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sysinfo.h"
+
+// Hang so trong sysinfo.h phai khop voi kernel; sai lech se bao loi luc bien dich.
+_Static_assert(SI_NPROC == NPROC, "SI_NPROC phai bang NPROC");
+_Static_assert(SI_NOFILE == NOFILE, "SI_NOFILE phai bang NOFILE");
+_Static_assert(SI_NFILE == NFILE, "SI_NFILE phai bang NFILE");
+_Static_assert(SI_USED == USED && SI_SLEEPING == SLEEPING &&
+               SI_RUNNABLE == RUNNABLE && SI_RUNNING == RUNNING &&
+               SI_ZOMBIE == ZOMBIE, "ma SI_* phai khop enum procstate");
 
 struct cpu cpus[NCPU];
 
@@ -125,6 +134,7 @@ found:
   p->pid = allocpid();
   p->state = USED;
   p->tracemask = 0;
+  p->nsched = 0;     // process moi: chua duoc lap lich lan nao
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -169,6 +179,7 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->nsched = 0;
   p->state = UNUSED;
 }
 
@@ -464,6 +475,7 @@ scheduler(void)
         // to release its lock and then reacquire it
         // before jumping back to us.
         p->state = RUNNING;
+        p->nsched++;   // mot lan lap lich: dang giu p->lock, ngay truoc swtch()
         c->proc = p;
         swtch(&c->context, &p->context);
 
@@ -693,5 +705,89 @@ procdump(void)
       state = "???";
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Thu thap thong tin process cho system call sysinfo (nguoi 3).
+// ---------------------------------------------------------------------------
+
+// Chup thong tin moi process co state != UNUSED vao out[0..max-1].
+// Tra ve so process da ghi (= info->nproc).
+//
+// Locking: lay wait_lock truoc roi moi den p->lock (dung thu tu ma xv6 quy
+// dinh, xem chu thich cua wait_lock).  wait_lock giu cho p->parent khong doi
+// va cho process cha khong bi freeproc() trong luc ta doc parent->pid.
+// p->lock giu cho state, pid va nsched nhat quan voi nhau.
+// Ham goi khong duoc dang giu wait_lock hay bat ky p->lock nao.
+int
+procinfo_collect(struct procinfo *out, int max)
+{
+  struct proc *p;
+  int n = 0;
+
+  acquire(&wait_lock);
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED && n < max){
+      struct procinfo *pi = &out[n++];
+
+      pi->pid = p->pid;
+      pi->state = p->state;
+      pi->ppid = p->parent ? p->parent->pid : 0;
+      pi->nsched = p->nsched;
+      safestrcpy(pi->name, p->name, sizeof(pi->name));
+
+      // ofile[] la du lieu rieng cua process.  Ta chi doc con tro (doc 64-bit
+      // la nguyen tu tren RISC-V) va doi sang slot; fileslot() chi tinh chi
+      // so trong ftable nen an toan ke ca khi file vua bi dong o CPU khac.
+      pi->nofile = 0;
+      for(int fd = 0; fd < NOFILE; fd++){
+        struct file *f = p->ofile[fd];
+        if(f){
+          pi->ofile[fd] = fileslot(f);
+          pi->nofile++;
+        } else {
+          pi->ofile[fd] = -1;
+        }
+      }
+    }
+    release(&p->lock);
+  }
+  release(&wait_lock);
+
+  return n;
+}
+
+// Dien danh sach PID tham chieu toi tung file (chieu file -> process) tu
+// snapshot process.  Chi lam viec tren 2 mang da chup nen khong can lock.
+// Moi PID chi duoc ghi 1 lan cho moi file, du process do co nhieu fd cung
+// tro toi file (vi du sau dup()).
+void
+sysinfo_linkpids(struct procinfo *procs, int nproc,
+                 struct fileinfo *files, int nfile)
+{
+  int idx[NFILE];   // idx[slot] = vi tri cua slot trong files[], -1 neu khong co
+
+  for(int s = 0; s < NFILE; s++)
+    idx[s] = -1;
+  for(int i = 0; i < nfile; i++){
+    files[i].npids = 0;
+    if(files[i].slot >= 0 && files[i].slot < NFILE)
+      idx[files[i].slot] = i;
+  }
+
+  for(int j = 0; j < nproc; j++){
+    for(int fd = 0; fd < NOFILE; fd++){
+      int slot = procs[j].ofile[fd];
+      if(slot < 0 || slot >= NFILE || idx[slot] < 0)
+        continue;   // fd trong, hoac file da dong giua 2 lan chup
+      struct fileinfo *fi = &files[idx[slot]];
+      // cac fd cua cung process duoc duyet lien tiep, nen chi can so voi PID cuoi
+      if(fi->npids > 0 && fi->pids[fi->npids - 1] == procs[j].pid)
+        continue;
+      if(fi->npids < NPROC)
+        fi->pids[fi->npids++] = procs[j].pid;
+    }
   }
 }
