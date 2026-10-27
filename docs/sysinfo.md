@@ -1,192 +1,160 @@
-# Project 1: contract tích hợp sysinfo
+# Project 1: system call sysinfo
 
-## Trạng thái
+`int sysinfo(struct sysinfo *info)` (syscall số 23) chụp thông tin hệ thống
+đang chạy và chép về user space. Trả 0 nếu thành công, -1 nếu lỗi.
 
-Phần Phước đã có ABI, syscall 23, pointer validation, storage, liên kết PID/file,
-user tests và build entry. **PENDING_TEAM_INTEGRATION**: chưa có collector thật
-trong `kernel/file.c` và `kernel/proc.c`; bản mặc định luôn trả `-1`, không ghi
-buffer user. Không có stub collector hay snapshot thành công chứa dữ liệu giả.
-Không sửa ba file `kernel/file.c`, `kernel/proc.c`, `kernel/proc.h`.
+- Các open-file object trong toàn hệ thống (`ftable.file[]` có `ref > 0`):
+  slot, type, mode, reference count, danh sách PID đang tham chiếu.
+- Các process có `state != UNUSED`: pid, state, pid của cha, số lần được
+  lập lịch, danh sách file đang mở (fd và slot của object).
 
-## ABI và ownership
+## Phân công
 
-`kernel/sysinfo.h` dùng chung kernel/user, không chứa pointer hay lock.
-Với NFILE=100, NPROC=64, NOFILE=16 và RV64:
+| Phần | Người | File |
+|---|---|---|
+| ABI, đăng ký syscall, kiểm tra con trỏ user, liên kết file → PID, `copyout`, chương trình test | Phước | `kernel/sysinfo.h`, `kernel/syscall.[ch]`, `kernel/sysproc.c`, `kernel/main.c`, `user/user.h`, `user/usys.pl`, `user/sysinfotest.c`, `Makefile` |
+| Thu thập bảng file: `collect_file_info()`, `sysinfo_file_slot()` | Tài | `kernel/file.c` |
+| Bộ đếm lập lịch `nsched`, thu thập bảng process: `collect_proc_info()` | Phát | `kernel/proc.c`, `kernel/proc.h` |
 
-| Kiểu | Size (byte) | Alignment |
-|---|---:|---:|
-| sysinfo_fd | 8 | 4 |
-| sysinfo_file | 276 | 4 |
-| sysinfo_proc | 152 | 8 |
-| sysinfo | 37336 | 8 |
+## ABI (`kernel/sysinfo.h`)
 
-Hai count chiếm 8 byte, files bắt đầu tại offset 8, procs tại offset 27608.
-`schedule_count` nằm tại offset 16 trong mỗi process. Không có flexible array.
-Arrays là packed: chỉ entries `[0, count)` có nghĩa; không dùng slot làm index
-vào mảng files trả về. ABI chưa có version: thay layout phải rebuild cả kernel
-và user. Không diễn giải dữ liệu từ kernel/user có version khác nhau.
+Dùng chung cho kernel và user, không chứa con trỏ hay lock. Với NFILE=100,
+NPROC=64, NOFILE=16 trên RV64:
 
-- `slot`: index của object trong `ftable.file[NFILE]`, **không phải** fd.
-- `fd`: index trong `p->ofile[NOFILE]`.
+| Kiểu | Kích thước (byte) |
+|---|---:|
+| `struct sysinfo_fd` | 8 |
+| `struct sysinfo_file` | 276 |
+| `struct sysinfo_proc` | 152 |
+| `struct sysinfo` | 37336 |
+
+- `file_count`, `proc_count`: số phần tử có nghĩa trong `files[]`, `procs[]`
+  (mảng packed, chỉ `[0, count)` có nghĩa).
+- `slot`: chỉ số của object trong `ftable.file[]`, **không phải** fd.
+- `type`: `SYSINFO_NONE/PIPE/INODE/DEVICE`, cùng giá trị với `FD_*` của xv6.
 - `mode = (readable ? SYSINFO_READ : 0) | (writable ? SYSINFO_WRITE : 0)`.
-  Không chứa O_CREATE/O_TRUNC hay các cờ open ban đầu không được lưu trong file.
-- type và state dùng giá trị ABI trong header, tương ứng enum xv6 hiện tại.
-  NONE vẫn hợp lệ khi một object có ref>0 đang được khởi tạo.
-- `ppid=0` nếu không có cha. Parent có thể biến mất giữa hai lần quan sát.
-- PID trong file không trùng; nhiều fd cùng PID vẫn đóng góp nhiều ref.
-  **Không khẳng định ref == npids**, cũng không ép ref bằng số fd quan sát được.
+  xv6 không lưu cờ `O_CREATE`/`O_TRUNC` trong `struct file`.
+- `pids[]`: mỗi PID xuất hiện một lần, kể cả khi process có nhiều fd cùng trỏ
+  tới object (sau `dup()`), nên `ref` có thể lớn hơn `npids`.
+- `state`: `SYSINFO_UNUSED..SYSINFO_ZOMBIE`, cùng giá trị với `enum procstate`
+  (kiểm tra bằng `_Static_assert` trong `proc.c` và `sysproc.c`).
+- `ppid = 0` khi không có cha (chỉ init).
+- `schedule_count`: số lần `scheduler()` chọn process để chạy.
+- `fds[]`: cặp (fd, slot) cho mỗi fd đang mở, `nfd` phần tử.
 
-## Giao diện Tài cần cung cấp
+Struct 37 KB lớn hơn kernel stack và user stack (mỗi cái 4 KB): kernel dùng
+một buffer tĩnh, chương trình user phải khai báo biến toàn cục.
 
-```c
-int collect_file_info(struct sysinfo *info);
-int sysinfo_file_slot(struct file *f);
+## Luồng xử lý `sys_sysinfo()`
+
+1. `argaddr()` lấy địa chỉ, `sysinfo_user_buffer()` kiểm tra trước toàn bộ
+   vùng nhớ đích: khác NULL, nằm trong `p->sz` và dưới `MAXVA` (dùng phép trừ
+   để tránh tràn số), mọi trang đều có `PTE_V | PTE_U | PTE_W`. Sai thì trả -1
+   và không ghi byte nào.
+2. Lấy sleeplock `sysinfo_lock` bảo vệ buffer tĩnh `snapshot`, rồi `memset`.
+3. `collect_file_info()` (Tài): dưới `ftable.lock`, chép slot, type, mode,
+   ref của mọi object có `ref > 0`.
+4. `collect_proc_info()` (Phát): lấy `wait_lock` rồi lần lượt từng `p->lock`,
+   chép pid, state, ppid, `nsched` và đổi `p->ofile[fd]` thành slot bằng
+   `sysinfo_file_slot()`.
+5. `sysinfo_link()` (Phước): kiểm tra cấu trúc và dựng danh sách PID cho
+   từng object từ `fds[]` của các process.
+6. `copyout()` về user, nhả sleeplock.
+
+## Bộ đếm lập lịch
+
+- Trường `uint64 nsched` trong `struct proc`, thuộc nhóm trường do `p->lock`
+  bảo vệ.
+- Tăng trong `scheduler()` ngay sau `p->state = RUNNING` và trước `swtch()`,
+  khi đang giữ `p->lock`: đây là nơi duy nhất process chuyển từ RUNNABLE sang
+  RUNNING, nên mỗi lần lập lịch được đếm đúng một lần.
+- Đặt về 0 trong `allocproc()` (process con không thừa hưởng bộ đếm của cha)
+  và `freeproc()`. `exec()` không đặt lại vì vẫn là cùng một process.
+
+## Khóa và mức nhất quán
+
+- Không giữ spinlock nào giữa hai collector. Thứ tự khóa:
+  `sysinfo_lock` (sleeplock) → `wait_lock` → `p->lock`, giống `wait()`.
+  `ftable.lock` không bao giờ được giữ cùng lúc với `p->lock` (fork giữ
+  `np->lock` khi gọi `filedup()`, nên thứ tự ngược lại có thể deadlock).
+- `sysinfo_file_slot()` chỉ so sánh địa chỉ, không lấy khóa, không đọc nội
+  dung object, nên gọi được khi đang giữ `p->lock`.
+- `wait_lock` giữ cho `p->parent` không đổi và cho process cha không bị
+  `freeproc()` trong lúc đọc `parent->pid`.
+- Snapshot là *best-effort*, không đồng thời tuyệt đối:
+  - Bảng file được chụp trước bảng process. Nếu `open()` hoặc `exit()`
+    (`exit` đóng file trước rồi mới xóa `ofile[]`) xảy ra giữa hai lần chụp,
+    một fd có thể trỏ tới object không có trong snapshot; `sysinfo_link()`
+    bỏ fd đó, snapshot vẫn nhất quán.
+  - `sys_close()` xóa `ofile[fd]` trước rồi mới giảm `ref`, nên trong khoảnh
+    khắc đó `ref` lớn hơn số fd quan sát được.
+  - Một slot bị đóng rồi được cấp lại giữa hai lần chụp thì không phát hiện được.
+  - Khi hệ thống yên lặng (không process nào đang open/close/exit), `ref` của
+    mỗi object bằng đúng tổng số fd trỏ tới nó; test kiểm tra chặt điều này.
+
+## Các trường hợp `sysinfo()` trả -1
+
+| Nơi | Điều kiện | Ghi chú |
+|---|---|---|
+| `sysinfo_user_buffer()` | địa chỉ NULL, vượt `p->sz` hoặc `MAXVA`, tràn số, có trang chưa map / trang guard / trang chỉ đọc | không ghi gì vào bộ nhớ user |
+| `sysinfo_collect()` | một collector trả khác 0 | hai collector hiện luôn trả 0 |
+| `sysinfo_link()` | count ngoài miền, slot/PID/fd trùng, giá trị type/state/mode sai, quá NPROC PID cho một object | kiểm tra phòng thủ; collector hiện tại không tạo ra dữ liệu như vậy |
+| `copyout()` | không chép được | không xảy ra sau khi đã kiểm tra trước ở bước 1 |
+
+fd trỏ tới object không có trong snapshot **không** làm lời gọi thất bại
+(xem mục trên).
+
+## Build và chạy
+
+```sh
+make clean
+make qemu            # 3 CPU (mặc định)
+make qemu CPUS=1
 ```
 
-`collect_file_info` điền `file_count` và packed `files[]`: slot, type, mode, ref.
-Chỉ lấy object ref>0. Không sửa `proc_count/procs[]`; không cần điền pids/npids.
-Khóa nguồn được lấy/thả bên trong collector, không trả về khi còn giữ spinlock.
-Trả 0 thành công, -1 khi không thể tạo dữ liệu theo contract; không vượt NFILE.
+Trong xv6:
 
-`sysinfo_file_slot` dùng cho Phát: ánh xạ địa chỉ object sang slot, trả -1 nếu
-không thuộc table. Helper chỉ xác định vị trí, không dereference object, không
-đọc ref/type và **không lấy ftable.lock** vì caller có thể giữ p->lock.
-Có thể so sánh equality với địa chỉ từng phần tử; tránh pointer subtraction
-trên pointer không thuộc array. Helper không bảo đảm object còn hoạt động hay
-chưa bị tái sử dụng. Pointer này chỉ dùng nội bộ kernel, không ghi vào ABI.
-
-## Giao diện Phát cần cung cấp
-
-```c
-int collect_proc_info(struct sysinfo *info);
+```
+$ sysinfotest              # chạy 19 nhóm test, in bảng ở các tình huống chính
+$ sysinfotest show         # chỉ in snapshot hiện tại
+$ cat README | sysinfotest show   # thấy hai process nối nhau qua pipe
 ```
 
-Điền `proc_count` và packed `procs[]` cho state != UNUSED: pid, state, ppid,
-uint64 schedule_count, nfd và packed fds[] chứa fd/file_slot. Không sửa files.
-Trả 0 thành công, -1 khi lỗi; không vượt NPROC/NOFILE, không trả fd trùng.
-Bộ đếm khởi tạo 0 khi alloc/reuse, tăng dưới p->lock ngay trước dispatch từ
-RUNNABLE sang RUNNING; không kế thừa counter từ cha. ZOMBIE không còn fd.
+`Makefile` thêm `-march=rv64g`: toolchain RISC-V mới (GCC 15) mặc định sinh
+lệnh của profile RVA23 (ví dụ `c.mul`) mà CPU mặc định của QEMU không chạy được.
 
-## Locking và mức nhất quán
+## Danh sách test (`user/sysinfotest.c`)
 
-Phước dùng một buffer static 37336 byte và một sleeplock, khởi tạo sau fileinit
-và trước userinit trên boot CPU. Caller giữ sleeplock từ memset qua collectors,
-validation/linking và copyout. Caller khác phải chờ, không ghi đè snapshot.
-Mọi đường lỗi sau acquire đều đi qua releasesleep. Sleeplock bảo vệ **storage**,
-không tự khóa bảng nguồn; không giữ spinlock khi acquire/release sleeplock.
-Không collector nào được gọi lại sysinfo hoặc lấy sysinfo_lock.
+| # | Test | Kiểm tra |
+|---|---|---|
+| 01 | basic | process gọi là RUNNING; in snapshot ban đầu |
+| 02 | init and console | init: pid 1, ppid 0, SLEEPING, fd 0-2 cùng một object console DEVICE rw; cha của test SLEEPING; ref khớp số fd |
+| 03 | open | object mới INODE rw ref 1; O_RDONLY → `r-`, O_WRONLY → `-w` |
+| 04 | dup | cùng slot, ref +1, PID không lặp |
+| 05 | close | ref giảm; đóng fd cuối thì object biến mất |
+| 06 | pipe | hai object PIPE, đầu đọc `r-`, đầu ghi `-w` |
+| 07 | fork | con dùng chung object, ref nhân đôi, con SLEEPING, ppid đúng |
+| 08 | multiple process references | 2 con, 2 fd trên một object: ref = 2 × 3, npids = 3 |
+| 09 | exit/zombie/wait | ZOMBIE vẫn được đếm, không còn fd, ppid giữ nguyên; wait xong thì biến mất |
+| 10 | kill sleeping process | process ngủ trên pipe bị kill thoát với status -1 |
+| 11 | reparent to init | cha thoát trước, cháu có ppid = 1 và được init dọn |
+| 12 | scheduling count | bộ đếm tăng; process con bắt đầu từ 0; không tăng khi SLEEPING |
+| 13 | runnable under CPU contention | NCPU+1 process tính toán: có RUNNABLE, bộ đếm tăng nhờ ngắt timer |
+| 14 | full descriptor table | đủ NOFILE fd đều được báo cáo |
+| 15 | full process table | fork tới khi đầy: đúng NPROC process, ref khớp số fd |
+| 16 | busy system | 300 lần gọi trong khi 3 process liên tục open/pipe/fork/exit: không lần nào lỗi |
+| 17 | invalid pointers | NULL, chưa map, tràn số, thiếu chỗ, trang guard, trang chỉ đọc: -1 và không ghi |
+| 18 | repeated calls | gọi lặp, buffer không căn lề, hai process gọi đồng thời |
+| 19 | trace regression | syscall `trace` của bài trước vẫn chạy, có tên `sysinfo` |
 
-Lock order quan sát được ở repo:
+Với `LAB_SYSCALL`, `uvmalloc()` không xóa trang nhớ user về 0 (phục vụ bài
+attack trước), nên BSS của chương trình user có thể chứa rác; `sysinfotest`
+tự khởi tạo mọi biến toàn cục.
 
-- fork giữ np->lock khi gọi filedup -> ftable.lock; sau đó thả np->lock trước
-  khi lấy wait_lock và công bố parent.
-- exit đóng các file trước wait_lock; sau đó wait_lock -> p->lock.
-- wait dùng wait_lock -> child p->lock; scheduler dùng từng p->lock.
-- sys_open/sys_dup/sys_close và exit cập nhật ofile **không lấy p->lock**.
-  Vì vậy chỉ lấy p->lock trong collector không đủ đồng bộ ofile hay toàn bộ
-  type/mode đang được sys_open khởi tạo. ftable.lock chủ yếu bảo vệ ref/allocation.
+## Unit test trên host
 
-Collector không được lấy ftable.lock rồi p->lock: đảo thứ tự fork. Parent phải
-được đọc theo wait_lock -> p->lock. Helper slot không lấy ftable.lock. Hai
-collector phải thả mọi source lock trước khi return, đặc biệt trước copyout.
-
-Contract hiện chỉ hướng tới **best-effort**, chưa có snapshot nguyên tử hoặc
-cơ chế generation để phát hiện slot reuse. `sysinfo_link` phát hiện counts,
-slot/fd/PID trùng, giá trị ngoài miền và fd tham chiếu slot không có trong
-snapshot; trả -1 thay vì xuất snapshot sai cấu trúc. Nó không phát hiện được
-một slot vừa bị đóng và tái sử dụng giữa hai collector. Không retry ngầm.
-
-**Dependency cần Tài/Phát giải quyết và thống nhất trước khi bật tích hợp:**
-quy tắc lấy mẫu ofile và metadata khi writer đang chạy. Đọc ofile dưới p->lock
-đơn thuần không chứng minh được an toàn. Muốn bảo đảm chặt chẽ cần đồng bộ với
-các writer, pin/generation hoặc cơ chế snapshot được nhóm thống nhất; các thay
-đổi vượt file phụ trách cần phối hợp, không được tự nhận đã giải quyết bằng
-sysinfo_lock. Các test exact-ref giữ riêng file thử và đồng bộ child; test
-concurrent sẽ kiểm tra thêm khi collector thật sẵn sàng.
-
-## Luồng syscall và user pointer
-
-User stub đặt a7=23 -> ecall -> dispatch sys_sysinfo; trace giữ logic cũ và có
-thêm tên sysinfo. argaddr chỉ lấy uint64, không dereference pointer user.
-Preflight từ chối null, phạm vi vượt p->sz/MAXVA (dùng phép trừ tránh overflow),
-và mọi page thiếu PTE_V/PTE_U/PTE_W. Chỉ sau đó mới lấy snapshot lock.
-Sau collect, validator dựng unique PID links từ fds; copyout dùng pagetable
-của caller và return được kiểm tra. Thành công 0, mọi lỗi -1.
-
-Preflight kiểm tra toàn bộ mapping trước khi ghi, tránh copyout một prefix rồi
-mới phát hiện page lỗi. xv6 hiện không có thread chia sẻ pagetable nên mapping
-không đổi bởi thread khác trong syscall. Không hứa rollback copyout nói chung.
-Kernel stack chỉ chứa pointer/scalar; test dùng hai struct global và một union cho buffer unaligned (112016 byte),
-không đặt struct trên user stack. Buffer tĩnh không dùng heap allocator kernel.
-
-## Bật tích hợp và chạy
-
-1. Tài/Phát thêm implementation đúng prototype trong defs.h; review locking ở
-   trên trước khi bật. Không thêm một hàm thành công nhưng không thu thập dữ liệu.
-2. Giữ collectors chỉ điền phần mình sở hữu; Phước tự dựng npids/pids sau cả hai.
-3. Backup các archive cần giữ: clean rule sẵn có của repo xóa `*.zip` ở root.
-4. `make clean`, sau đó `make -j4 SYSINFO_COLLECTORS=1 kernel/kernel fs.img`.
-   Phải clean khi đổi flag: Makefile hiện không track thay đổi command-line flags.
-5. `make CPUS=1 SYSINFO_COLLECTORS=1 qemu`, chạy `sysinfotest`; chạy lại CPUS=3.
-6. `trace 32 cat README`, `trace 8388608 sysinfotest`; kiểm tra trace read và tên
-   sysinfo. `echo normal-output` phải không sinh dòng syscall trace.
-
-`sysinfotest` có 12 nhóm: basic, open (3 mode), dup, close, fork, pipe,
-exit/zombie/wait, scheduling, invalid pointer, repeated/unaligned/concurrent,
-nhiều PID + nhiều fd, trace + kế thừa mask. Child được đồng bộ qua ready/go pipe;
-zombie được polling có timeout trước wait. Mọi file thử có tên `sysinfo.tmp` và
-được cleanup; chạy trong môi trường xv6 test riêng, không có workload nền.
-Exact global object deltas giả định môi trường test ổn định này, không phải hệ
-thống có workload bất kỳ. Không hardcode PID, boot count hoặc file slot.
-
-Bản pending: 10 nhóm dữ liệu BLOCKED; invalid-pointer chỉ kiểm tra rejection
-(tất cả syscall vốn trả -1, chưa chứng minh đường copy thành công); trace vẫn
-chạy được. Test thêm 20 valid pending calls, yêu cầu -1 và giữ nguyên buffer.
-Exit status: 0 nếu tất cả PASS, 1 nếu có FAIL, 2 nếu còn BLOCKED.
-Trace regression trong runner kiểm tra API/return/inheritance và phát ra hai
-dòng getpid trên UART; cần đối chiếu UART bên ngoài để xác minh output trace.
-Bật collectors mà valid call lỗi sẽ FAIL, không bị chuyển thành BLOCKED.
-
-Không dùng grade-lab-syscall để chấm Project 1: sysinfotest cũ của lab dùng ABI
-freemem/nproc, khác đề hiện tại. Mặc định `make` chỉ build kernel; cần fs.img
-để chắc chắn user tests cũng được compile và đưa vào image. trace/sysinfotest
-đều nằm ngoài conditional LAB=syscall và chạy được khi `LAB=`.
-
-Trong LAB=syscall, uvmalloc chủ động bỏ zero user pages phục vụ bài attack cũ.
-Runner tự khởi tạo counters, không dựa vào BSS bằng 0 và không dùng malloc với
-freep chưa được khởi tạo của lab này. Giữ nguyên hành vi Project 0.
-
-## Kết quả xác minh ngày 27/10/2026
-
-- Baseline `make -j4` và `make -j4 fs.img`: thành công trước khi sửa code.
-- `make clean`, `make -j4`, `make -j4 fs.img`: thành công; archive SourceCode.zip
-  cũ được backup/restore vì clean rule xóa zip, SHA-256 trước/sau trùng nhau.
-- Clean build `make -j4 LAB= kernel/kernel fs.img`: thành công. QEMU LAB=,
-  CPUS=1 chạy được cả sysinfotest và trace.
-- Bản cuối default LAB=syscall được clean build lại thành công.
-- QEMU CPUS=1 và CPUS=3: mỗi lần sysinfotest cho 2 PASS, 0 FAIL, 10 BLOCKED.
-  Hai PASS là invalid-pointer rejection và trace regression. Data tests 01-08,
-  10-11 BLOCKED. Không có snapshot thành công hay full integration PASS.
-- 20 valid pending calls trả -1 và không đổi buffer sentinel; hai runner đồng
-  thời cũng hoàn tất đúng summary (stdout riêng, trace vẫn đi UART).
-- UART xác minh hai dòng getpid của parent/child; `trace 32 cat README` có read;
-  `trace 8388608 sysinfotest` có `syscall sysinfo -> -1`; echo sau đó không trace.
-- Host unit chạy 38 checks, 0 failures trên actual sysproc.c: ABI/layout,
-  unique PID links, ref khác npids, malformed output và pointer preflight.
-  walk dùng test double, **không** thay collector hoặc giả lập tích hợp kernel.
-- Compile trực tiếp kernel và user với SYSINFO_COLLECTORS_READY: thành công.
-  `-fstack-usage` trên RISC-V báo sys_sysinfo frame=96 byte; user test frame lớn
-  nhất=160 byte. Đây là kích thước từng frame, chưa gồm collector tương lai.
-- Negative check `make -j4 SYSINFO_COLLECTORS=1 kernel/kernel fs.img` sau clean:
-  **thất bại đúng dependency**, undefined collect_file_info/collect_proc_info.
-  Không thêm stub để che lỗi. Sau đó restore clean default build thành công.
-- `git diff --check`: thành công. file.c/proc.c/proc.h/vm.c/user/trace.c không đổi.
-- Linker vẫn có warning LOAD segment RWX như baseline. Không có compile error
-  ở cấu hình mặc định. Các đường successful collect/copyout trong QEMU,
-  semantics file/process/scheduling và source-table concurrency: **NOT RUN**,
-  bị chặn bởi hai collector cùng giao thức đồng bộ chưa có.
-
-Chạy lại unit độc lập trên Ubuntu LP64, không cần boot xv6:
+Kiểm tra layout ABI, `sysinfo_link()` và `sysinfo_user_buffer()` của chính
+`kernel/sysproc.c` (hàm `walk()` được thay bằng bản giả):
 
 ```sh
 cc -O1 -Wall -Werror -fno-builtin -ffunction-sections -fdata-sections \
@@ -194,7 +162,18 @@ cc -O1 -Wall -Werror -fno-builtin -ffunction-sections -fdata-sections \
 /tmp/sysinfo-unit
 ```
 
-Log chi tiết phiên kiểm tra nằm tại `/tmp/os-hw1-review/` trên máy hiện tại:
-`default-final-build.log`, `no-lab-build.log`, `enabled-negative-build.log`,
-`qemu-cpus1.log`, `qemu-cpus3.log`, `qemu-no-lab-cpus1.log`, và các file `.su`.
-Nhánh triển khai: `phuoc/sysinfo-user-kernel`. Tích hợp collector vẫn đang chờ Tài/Phát.
+## Kết quả kiểm thử (27/10/2026)
+
+Môi trường: Ubuntu 26.04 trên WSL2, GCC 15.2 (`riscv64-linux-gnu`), QEMU 10.2.
+
+- `sysinfotest`: 19 PASS, 0 FAIL ở cả 10 lần chạy (1 CPU × 2, 3 CPU × 5,
+  4 CPU × 2, 8 CPU × 1).
+- Stress (chương trình tạm, không nằm trong bài nộp): 4 process liên tục
+  open/pipe/fork/exit trong khi 2 process gọi `sysinfo()` 3000 lần mỗi
+  process; 0 lần lỗi ở cả 3 lần chạy (3 và 4 CPU). Trước khi `sysinfo_link()`
+  bỏ qua fd trỏ tới object không có trong snapshot, khoảng 0,3% số lần gọi
+  trả -1 với 3 CPU.
+- `usertests -C`: 55 test OK; chỉ `sbrkmuch` và `bsstest` lỗi. Hai test này
+  cũng lỗi trên mã nguồn gốc vì `uvmalloc()` không xóa trang nhớ khi build với
+  `LAB_SYSCALL`.
+- Unit test trên host: 41 checks, 0 failures.
