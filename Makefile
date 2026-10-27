@@ -203,8 +203,7 @@ UPROGS += \
 	$U/_trace\
 	$U/_attack\
 	$U/_attacktest\
-	$U/_secret\
-	$U/_sysinfotest
+	$U/_secret
 endif
 
 ifeq ($(LAB),lock)

@@ -5,7 +5,6 @@
 #include "memlayout.h"
 #include "spinlock.h"
 #include "proc.h"
-#include "sysinfo.h"
 
 uint64
 sys_exit(void)
@@ -102,32 +101,4 @@ sys_trace(void)
   myproc()->tracemask = mask;
 
   return 0;
-}
-
-// [BAN TAM - PHAN NGUOI 1] chi de nguoi 3 build va test; thay bang ban cua nguoi 1.
-//
-// struct sysinfo ~34 KB > kernel stack (4 KB) nen dung buffer tinh, bao ve
-// bang sysinfo_lock (khoi tao tinh, tuong duong initlock()).
-// Thu tu lock: sysinfo_lock -> ftable.lock ; sysinfo_lock -> wait_lock -> p->lock.
-static struct sysinfo kinfo;
-static struct spinlock sysinfo_lock = { .locked = 0, .name = "sysinfo", .cpu = 0 };
-
-uint64
-sys_sysinfo(void)
-{
-  uint64 addr;
-  int r;
-
-  argaddr(0, &addr);
-
-  acquire(&sysinfo_lock);
-  memset(&kinfo, 0, sizeof(kinfo));
-  kinfo.nfile = filesinfo_collect(kinfo.files, NFILE);   // nguoi 2
-  kinfo.nproc = procinfo_collect(kinfo.procs, NPROC);    // nguoi 3
-  sysinfo_linkpids(kinfo.procs, kinfo.nproc,             // nguoi 3
-                   kinfo.files, kinfo.nfile);
-  r = copyout(myproc()->pagetable, addr, (char *)&kinfo, sizeof(kinfo));
-  release(&sysinfo_lock);
-
-  return r < 0 ? -1 : 0;
 }
