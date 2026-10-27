@@ -168,11 +168,6 @@ Môi trường: Ubuntu 26.04 trên WSL2, GCC 15.2 (`riscv64-linux-gnu`), QEMU 10
 
 - `sysinfotest`: 19 PASS, 0 FAIL ở cả 10 lần chạy (1 CPU × 2, 3 CPU × 5,
   4 CPU × 2, 8 CPU × 1).
-- Stress (chương trình tạm, không nằm trong bài nộp): 4 process liên tục
-  open/pipe/fork/exit trong khi 2 process gọi `sysinfo()` 3000 lần mỗi
-  process; 0 lần lỗi ở cả 3 lần chạy (3 và 4 CPU). Trước khi `sysinfo_link()`
-  bỏ qua fd trỏ tới object không có trong snapshot, khoảng 0,3% số lần gọi
-  trả -1 với 3 CPU.
 - `usertests -C`: 55 test OK; chỉ `sbrkmuch` và `bsstest` lỗi. Hai test này
   cũng lỗi trên mã nguồn gốc vì `uvmalloc()` không xóa trang nhớ khi build với
   `LAB_SYSCALL`.
