@@ -5,6 +5,16 @@
 #include "spinlock.h"
 #include "proc.h"
 #include "defs.h"
+#include "sysinfo.h"
+
+// Ma state trong sysinfo.h phai khop enum procstate; sai lech se bao loi luc bien dich.
+_Static_assert((int)SYSINFO_UNUSED == (int)UNUSED &&
+               (int)SYSINFO_USED == (int)USED &&
+               (int)SYSINFO_SLEEPING == (int)SLEEPING &&
+               (int)SYSINFO_RUNNABLE == (int)RUNNABLE &&
+               (int)SYSINFO_RUNNING == (int)RUNNING &&
+               (int)SYSINFO_ZOMBIE == (int)ZOMBIE,
+               "ma SYSINFO_* phai khop enum procstate");
 
 struct cpu cpus[NCPU];
 
@@ -125,6 +135,7 @@ found:
   p->pid = allocpid();
   p->state = USED;
   p->tracemask = 0;
+  p->nsched = 0;     // process moi: chua duoc lap lich lan nao
 
   // Allocate a trapframe page.
   if((p->trapframe = (struct trapframe *)kalloc()) == 0){
@@ -169,6 +180,7 @@ freeproc(struct proc *p)
   p->chan = 0;
   p->killed = 0;
   p->xstate = 0;
+  p->nsched = 0;
   p->state = UNUSED;
 }
 
@@ -464,6 +476,7 @@ scheduler(void)
         // to release its lock and then reacquire it
         // before jumping back to us.
         p->state = RUNNING;
+        p->nsched++;   // mot lan lap lich: dang giu p->lock, ngay truoc swtch()
         c->proc = p;
         swtch(&c->context, &p->context);
 
@@ -694,4 +707,57 @@ procdump(void)
     printf("%d %s %s", p->pid, state, p->name);
     printf("\n");
   }
+}
+
+// ---------------------------------------------------------------------------
+// Thu thap thong tin process cho system call sysinfo (nguoi 3).
+// ---------------------------------------------------------------------------
+
+// Dien proc_count va procs[] (packed) cho moi process co state != UNUSED:
+// pid, state, ppid, schedule_count va danh sach fd dang mo (fd, file_slot).
+// Khong dung toi files[]; danh sach PID cua tung file do sys_sysinfo() dung
+// tu fds[] sau khi ca hai collector chay xong.  Tra ve 0.
+//
+// Locking: lay wait_lock truoc roi moi den p->lock (dung thu tu ma xv6 quy
+// dinh, xem chu thich cua wait_lock).  wait_lock giu cho p->parent khong doi
+// va cho process cha khong bi freeproc() trong luc ta doc parent->pid.
+// p->lock giu cho state, pid va nsched nhat quan voi nhau.
+// Ham goi khong duoc dang giu wait_lock hay bat ky p->lock nao.
+int
+collect_proc_info(struct sysinfo *info)
+{
+  struct proc *p;
+  int n = 0;
+
+  acquire(&wait_lock);
+  for(p = proc; p < &proc[NPROC]; p++){
+    acquire(&p->lock);
+    if(p->state != UNUSED){
+      struct sysinfo_proc *pi = &info->procs[n++];
+
+      pi->pid = p->pid;
+      pi->state = p->state;
+      pi->ppid = p->parent ? p->parent->pid : 0;
+      pi->schedule_count = p->nsched;
+
+      // ofile[] la du lieu rieng cua process.  Ta chi doc con tro (doc 64-bit
+      // la nguyen tu tren RISC-V) va doi sang slot; sysinfo_file_slot() chi
+      // so sanh dia chi, khong lay khoa, nen an toan khi dang giu p->lock.
+      pi->nfd = 0;
+      for(int fd = 0; fd < NOFILE; fd++){
+        struct file *f = p->ofile[fd];
+        int slot;
+        if(f == 0 || (slot = sysinfo_file_slot(f)) < 0)
+          continue;
+        pi->fds[pi->nfd].fd = fd;
+        pi->fds[pi->nfd].file_slot = slot;
+        pi->nfd++;
+      }
+    }
+    release(&p->lock);
+  }
+  release(&wait_lock);
+
+  info->proc_count = n;
+  return 0;
 }
