@@ -1,3 +1,8 @@
+// Tests for the sysinfo() system call.
+//
+//   sysinfotest        run every test and show snapshots of key scenarios
+//   sysinfotest show   only print the current snapshot (for demos,
+//                      e.g. "cat README | sysinfotest show")
 #include "kernel/types.h"
 #include "kernel/riscv.h"
 #include "kernel/fcntl.h"
@@ -11,13 +16,101 @@ static union {
   uint64 align;
   char bytes[sizeof(struct sysinfo) + 1];
 } unaligned;
-static int passed, failed, blocked;
+static int passed, failed;
 static char *path = "sysinfo.tmp";
 extern char end[];
 
 #define CHECK(c, why) do { if(!(c)){ \
   printf("  %s (line %d)\n", why, __LINE__); ok = 0; goto out; \
 } } while(0)
+
+// ---------------------------------------------------------------- printing
+
+static char *statenames[] = {
+  "UNUSED", "USED", "SLEEPING", "RUNNABLE", "RUNNING", "ZOMBIE"
+};
+static char *typenames[] = { "NONE", "PIPE", "INODE", "DEVICE" };
+static char *modenames[] = { "--", "r-", "-w", "rw" };
+
+static char*
+statename(int s)
+{
+  return s >= SYSINFO_UNUSED && s <= SYSINFO_ZOMBIE ? statenames[s] : "?";
+}
+
+static char*
+typename(int t)
+{
+  return t >= SYSINFO_NONE && t <= SYSINFO_DEVICE ? typenames[t] : "?";
+}
+
+static void
+pad(int n)
+{
+  while(n-- > 0)
+    printf(" ");
+}
+
+static int
+width(uint64 v)
+{
+  int n = 1;
+  while(v >= 10){
+    v /= 10;
+    n++;
+  }
+  return n;
+}
+
+// Left-aligned columns; xv6's printf has no field widths.
+static void
+col(uint64 v, int w)
+{
+  printf("%lu", v);
+  pad(w - width(v));
+}
+
+static void
+cols(char *s, int w)
+{
+  printf("%s", s);
+  pad(w - (int)strlen(s));
+}
+
+// Print what sysinfo() returned: one row per open-file object and process.
+static void
+show(char *title, struct sysinfo *s)
+{
+  printf("  --- %s ---\n", title);
+  printf("  open-file objects: %d\n", s->file_count);
+  printf("    slot type    mode ref  pids\n");
+  for(int i = 0; i < s->file_count; i++){
+    struct sysinfo_file *f = &s->files[i];
+    printf("    ");
+    col(f->slot, 5);
+    cols(typename(f->type), 8);
+    cols(f->mode >= 0 && f->mode <= 3 ? modenames[f->mode] : "?", 5);
+    col(f->ref, 5);
+    for(int j = 0; j < f->npids; j++)
+      printf("%d ", f->pids[j]);
+    printf("\n");
+  }
+  printf("  processes (state != UNUSED): %d\n", s->proc_count);
+  printf("    pid  ppid state     sched  fd->slot\n");
+  for(int i = 0; i < s->proc_count; i++){
+    struct sysinfo_proc *p = &s->procs[i];
+    printf("    ");
+    col(p->pid, 5);
+    col(p->ppid, 5);
+    cols(statename(p->state), 10);
+    col(p->schedule_count, 7);
+    for(int j = 0; j < p->nfd; j++)
+      printf("%d->%d ", p->fds[j].fd, p->fds[j].file_slot);
+    printf("\n");
+  }
+}
+
+// ---------------------------------------------------------------- helpers
 
 static struct sysinfo_proc*
 findproc(struct sysinfo *s, int pid)
@@ -123,6 +216,79 @@ capture(struct sysinfo *s)
   return 1;
 }
 
+// Stricter checks for a quiet system, where no process is between
+// open/close/exit: every reference to an object comes from a descriptor,
+// every parent exists, and only init has no parent.
+static int
+quiet(struct sysinfo *s)
+{
+  int roots = 0;
+  for(int i = 0; i < s->file_count; i++){
+    struct sysinfo_file *f = &s->files[i];
+    int fds = 0;
+    for(int j = 0; j < s->proc_count; j++)
+      for(int k = 0; k < s->procs[j].nfd; k++)
+        if(s->procs[j].fds[k].file_slot == f->slot)
+          fds++;
+    if(fds != f->ref){
+      printf("  slot %d: ref=%d but %d descriptors\n", f->slot, f->ref, fds);
+      return 0;
+    }
+  }
+  for(int i = 0; i < s->proc_count; i++){
+    struct sysinfo_proc *p = &s->procs[i];
+    if(p->ppid == 0)
+      roots++;
+    else if(!findproc(s, p->ppid)){
+      printf("  pid %d: parent %d missing\n", p->pid, p->ppid);
+      return 0;
+    }
+  }
+  if(roots != 1){
+    printf("  %d processes without a parent (only init may)\n", roots);
+    return 0;
+  }
+  return 1;
+}
+
+// Poll until process pid reaches state; the matching snapshot is left in s.
+static int
+waitstate(struct sysinfo *s, int pid, int state)
+{
+  for(int i = 0; i < 100; i++){
+    if(!capture(s))
+      return 0;
+    struct sysinfo_proc *p = findproc(s, pid);
+    if(p && p->state == state)
+      return 1;
+    sleep(1);
+  }
+  return 0;
+}
+
+// Poll until every child of this process sleeps, then take a fresh
+// snapshot: files are sampled before processes, so only a snapshot that
+// starts after the children are asleep is fully stable.
+static int
+childrenasleep(struct sysinfo *s)
+{
+  int me = getpid();
+  for(int t = 0; t < 100; t++){
+    if(!capture(s))
+      return 0;
+    int busy = 0;
+    for(int i = 0; i < s->proc_count; i++)
+      if(s->procs[i].ppid == me && s->procs[i].state != SYSINFO_SLEEPING)
+        busy++;
+    if(busy == 0)
+      return capture(s);
+    sleep(1);
+  }
+  return 0;
+}
+
+// ---------------------------------------------------------------- tests
+
 static int
 basic(void)
 {
@@ -132,6 +298,32 @@ basic(void)
   CHECK(p && p->state == SYSINFO_RUNNING, "caller must be RUNNING");
   printf("  ABI=%d bytes, files=%d, processes=%d\n",
          (int)sizeof(after), after.file_count, after.proc_count);
+  show("initial state", &after);
+out:
+  return ok;
+}
+
+// init opens the console once and dups it to fds 0, 1 and 2.
+static int
+inittest(void)
+{
+  int ok = 1;
+  CHECK(capture(&after) && quiet(&after), "quiet initial snapshot");
+  struct sysinfo_proc *init = findproc(&after, 1);
+  CHECK(init && init->ppid == 0, "init has pid 1 and no parent");
+  CHECK(init->state == SYSINFO_SLEEPING, "init waits for children: SLEEPING");
+  CHECK(init->nfd == 3, "init holds exactly fds 0, 1, 2");
+  int con = slotof(&after, 1, 0);
+  CHECK(slotof(&after, 1, 1) == con && slotof(&after, 1, 2) == con,
+        "fds 0-2 of init share one console object");
+  struct sysinfo_file *f = findfile(&after, con);
+  CHECK(f && f->type == SYSINFO_DEVICE &&
+        f->mode == (SYSINFO_READ | SYSINFO_WRITE), "console: read/write DEVICE");
+  CHECK(haspid(f, 1) && haspid(f, getpid()), "console used by init and by us");
+  struct sysinfo_proc *me = findproc(&after, getpid());
+  CHECK(me && findproc(&after, me->ppid), "our parent is listed");
+  CHECK(findproc(&after, me->ppid)->state == SYSINFO_SLEEPING,
+        "our parent waits for us: SLEEPING");
 out:
   return ok;
 }
@@ -218,10 +410,30 @@ out:
   return ok;
 }
 
+static int
+pipetest(void)
+{
+  int ok = 1, p[2] = {-1, -1};
+  CHECK(capture(&before), "before pipe");
+  CHECK(pipe(p) == 0 && capture(&after), "pipe and snapshot");
+  int r = slotof(&after, getpid(), p[0]), w = slotof(&after, getpid(), p[1]);
+  struct sysinfo_file *rf = findfile(&after, r), *wf = findfile(&after, w);
+  CHECK(r != w && rf && wf, "pipe uses two file objects");
+  CHECK(rf->type == SYSINFO_PIPE && wf->type == SYSINFO_PIPE, "pipe types");
+  CHECK(rf->mode == SYSINFO_READ && wf->mode == SYSINFO_WRITE, "pipe modes");
+  CHECK(rf->ref == 1 && wf->ref == 1, "pipe endpoint references");
+  CHECK(after.file_count == before.file_count + 2, "two additional objects");
+  show("pipe: read end r- and write end -w", &after);
+out:
+  if(p[0] >= 0) close(p[0]);
+  if(p[1] >= 0) close(p[1]);
+  return ok;
+}
+
 // Children signal readiness, then wait for a token before closing inherited FDs.
 // All exact reference checks concern only our private test file.
 static int
-sharedtest(int children, int duplicate)
+sharedtest(int children, int duplicate, char *title)
 {
   int ok = 1, fd = -1, d = -1, ready[2] = {-1, -1}, go[2] = {-1, -1};
   int pids[2], started = 0, status, slot = -1, ref = 0;
@@ -252,10 +464,12 @@ sharedtest(int children, int duplicate)
   }
   for(int i = 0; i < started; i++)
     CHECK(read(ready[0], &token, 1) == 1, "child ready");
-  CHECK(capture(&after), "children hold inherited descriptors");
+  CHECK(childrenasleep(&after), "children hold inherited descriptors");
+  CHECK(quiet(&after), "references match descriptors");
   for(int i = 0; i < started; i++){
     struct sysinfo_proc *p = findproc(&after, pids[i]);
     CHECK(p && p->ppid == getpid(), "child PID and parent PID");
+    CHECK(p->state == SYSINFO_SLEEPING, "child blocked on a pipe: SLEEPING");
     CHECK(slotof(&after, pids[i], fd) == slot, "inherited object slot");
     if(duplicate)
       CHECK(slotof(&after, pids[i], d) == slot, "both inherited descriptors");
@@ -266,6 +480,7 @@ sharedtest(int children, int duplicate)
   for(int i = 0; i < started; i++)
     CHECK(haspid(f, pids[i]), "child in file PID list");
   CHECK(after.file_count == before.file_count, "fork allocates no file objects");
+  show(title, &after);
   for(int i = 0; i < started; i++)
     CHECK(write(go[1], &token, 1) == 1, "release child");
 out:
@@ -290,26 +505,16 @@ out:
   return ok;
 }
 
-static int forktest(void) { return sharedtest(1, 0); }
-static int multiproctest(void) { return sharedtest(2, 1); }
+static int
+forktest(void)
+{
+  return sharedtest(1, 0, "fork: child shares the parent's open file");
+}
 
 static int
-pipetest(void)
+multiproctest(void)
 {
-  int ok = 1, p[2] = {-1, -1};
-  CHECK(capture(&before), "before pipe");
-  CHECK(pipe(p) == 0 && capture(&after), "pipe and snapshot");
-  int r = slotof(&after, getpid(), p[0]), w = slotof(&after, getpid(), p[1]);
-  struct sysinfo_file *rf = findfile(&after, r), *wf = findfile(&after, w);
-  CHECK(r != w && rf && wf, "pipe uses two file objects");
-  CHECK(rf->type == SYSINFO_PIPE && wf->type == SYSINFO_PIPE, "pipe types");
-  CHECK(rf->mode == SYSINFO_READ && wf->mode == SYSINFO_WRITE, "pipe modes");
-  CHECK(rf->ref == 1 && wf->ref == 1, "pipe endpoint references");
-  CHECK(after.file_count == before.file_count + 2, "two additional objects");
-out:
-  if(p[0] >= 0) close(p[0]);
-  if(p[1] >= 0) close(p[1]);
-  return ok;
+  return sharedtest(2, 1, "two children, two descriptors on one object");
 }
 
 static int
@@ -329,6 +534,7 @@ exittest(void)
     CHECK(p, "unreaped child must remain in table");
     if(p->state == SYSINFO_ZOMBIE){
       CHECK(p->nfd == 0, "zombie has no descriptors");
+      CHECK(p->ppid == getpid(), "zombie keeps its parent");
       zombie = 1;
       break;
     }
@@ -337,6 +543,7 @@ exittest(void)
   CHECK(zombie, "child reached ZOMBIE within timeout");
   struct sysinfo_file *f = findfile(&after, slotof(&after, getpid(), fd));
   CHECK(f && f->ref == 1 && !haspid(f, pid), "exit releases child references");
+  show("zombie: exited child not yet reaped", &after);
   int reaped = wait(&status);
   CHECK(reaped == pid && status == 0, "wait returns child PID and status");
   int oldpid = pid;
@@ -350,9 +557,87 @@ out:
 }
 
 static int
+killtest(void)
+{
+  int ok = 1, p[2] = {-1, -1}, pid = -1, status;
+  CHECK(pipe(p) == 0, "pipe");
+  pid = fork();
+  CHECK(pid >= 0, "fork sleeper");
+  if(pid == 0){
+    char c;
+    close(p[1]);
+    read(p[0], &c, 1);      // nobody writes: sleeps until killed
+    exit(0);
+  }
+  CHECK(waitstate(&after, pid, SYSINFO_SLEEPING), "blocked reader is SLEEPING");
+  CHECK(kill(pid) == 0, "kill the sleeping process");
+  int reaped = wait(&status);
+  int oldpid = pid;
+  pid = -1;
+  CHECK(reaped == oldpid && status == -1, "killed process exits with status -1");
+  CHECK(capture(&after) && !findproc(&after, oldpid), "killed process is gone");
+out:
+  if(p[0] >= 0) close(p[0]);
+  if(p[1] >= 0) close(p[1]);
+  if(pid > 0){ kill(pid); wait(&status); }
+  return ok;
+}
+
+// The child exits before the grandchild, which is then reparented to init.
+static int
+reparenttest(void)
+{
+  int ok = 1, p[2] = {-1, -1}, status, msg[2];
+  CHECK(pipe(p) == 0, "pipe");
+  int c = fork();
+  CHECK(c >= 0, "fork child");
+  if(c == 0){
+    int g = fork();
+    if(g < 0)
+      exit(1);
+    if(g == 0){
+      int res[2];
+      res[0] = 0;
+      res[1] = getpid();
+      for(int i = 0; i < 100; i++){
+        struct sysinfo_proc *me;
+        if(capture(&after) && (me = findproc(&after, getpid())) && me->ppid == 1){
+          res[0] = 1;
+          break;
+        }
+        sleep(1);
+      }
+      write(p[1], res, sizeof(res));
+      exit(0);
+    }
+    exit(0);
+  }
+  close(p[1]);
+  p[1] = -1;
+  CHECK(wait(&status) == c && status == 0, "child exits first");
+  CHECK(read(p[0], msg, sizeof(msg)) == sizeof(msg), "result from grandchild");
+  CHECK(msg[0] == 1, "orphaned grandchild gets ppid 1 (init)");
+  // let init reap the grandchild so later tests see a quiet system
+  int gone = 0;
+  for(int i = 0; i < 100 && !gone; i++){
+    CHECK(capture(&after), "poll for grandchild");
+    if(findproc(&after, msg[1]) == 0)
+      gone = 1;
+    else
+      sleep(1);
+  }
+  CHECK(gone, "init reaps the grandchild");
+out:
+  if(p[0] >= 0) close(p[0]);
+  if(p[1] >= 0) close(p[1]);
+  return ok;
+}
+
+static int
 scheduletest(void)
 {
-  int ok = 1;
+  int ok = 1, ready[2] = {-1, -1}, go[2] = {-1, -1}, pid = -1, status;
+  char token = 'x';
   CHECK(capture(&before), "before sleep");
   struct sysinfo_proc *p = findproc(&before, getpid());
   CHECK(p && p->schedule_count > 0, "caller has been scheduled");
@@ -360,7 +645,186 @@ scheduletest(void)
   CHECK(sleep(2) == 0 && capture(&after), "sleep and reschedule");
   p = findproc(&after, getpid());
   CHECK(p && p->schedule_count > count, "scheduling count increases");
+
+  // A new process starts counting from zero and is not charged while asleep.
+  CHECK(pipe(ready) == 0 && pipe(go) == 0, "synchronization pipes");
+  pid = fork();
+  CHECK(pid >= 0, "fork child");
+  if(pid == 0){
+    close(ready[0]);
+    close(go[1]);
+    if(write(ready[1], &token, 1) != 1 || read(go[0], &token, 1) != 1)
+      exit(1);
+    exit(0);
+  }
+  CHECK(read(ready[0], &token, 1) == 1, "child ready");
+  CHECK(waitstate(&before, pid, SYSINFO_SLEEPING), "child blocks: SLEEPING");
+  struct sysinfo_proc *c = findproc(&before, pid);
+  p = findproc(&before, getpid());
+  CHECK(c->schedule_count >= 1 && c->schedule_count < p->schedule_count,
+        "child counter starts from zero, not inherited");
+  CHECK(sleep(3) == 0 && capture(&after), "snapshot while the child sleeps");
+  struct sysinfo_proc *c2 = findproc(&after, pid);
+  CHECK(c2 && c2->schedule_count == c->schedule_count,
+        "a SLEEPING process is not scheduled");
+  CHECK(write(go[1], &token, 1) == 1, "release child");
 out:
+  if(go[0] >= 0) close(go[0]);
+  if(go[1] >= 0) close(go[1]);
+  if(ready[0] >= 0) close(ready[0]);
+  if(ready[1] >= 0) close(ready[1]);
+  if(pid > 0 && (wait(&status) != pid || status != 0)) ok = 0;
+  return ok;
+}
+
+// More CPU-bound processes than CPUs: some of them must wait as RUNNABLE.
+#define NSPIN (NCPU + 1)
+static int
+runnabletest(void)
+{
+  int ok = 1, pids[NSPIN], n = 0, status;
+  for(int i = 0; i < NSPIN; i++){
+    int pid = fork();
+    CHECK(pid >= 0, "fork spinner");
+    if(pid == 0)
+      for(;;)
+        ;
+    pids[n++] = pid;
+  }
+  sleep(2);
+  CHECK(capture(&before), "snapshot with spinners");
+  int runnable = 0;
+  uint64 sum0 = 0, sum1 = 0;
+  for(int i = 0; i < n; i++){
+    struct sysinfo_proc *p = findproc(&before, pids[i]);
+    CHECK(p && (p->state == SYSINFO_RUNNING || p->state == SYSINFO_RUNNABLE),
+          "spinner is RUNNING or RUNNABLE");
+    if(p->state == SYSINFO_RUNNABLE)
+      runnable++;
+    sum0 += p->schedule_count;
+  }
+  show("CPU-bound processes compete for CPUs", &before);
+  CHECK(runnable >= 1, "at least one spinner waits for a CPU: RUNNABLE");
+  CHECK(sleep(5) == 0 && capture(&after), "snapshot after timer preemption");
+  for(int i = 0; i < n; i++){
+    struct sysinfo_proc *p = findproc(&after, pids[i]);
+    CHECK(p, "spinner still listed");
+    sum1 += p->schedule_count;
+  }
+  CHECK(sum1 > sum0, "timer interrupts keep rescheduling the spinners");
+out:
+  for(int i = 0; i < n; i++)
+    kill(pids[i]);
+  for(int i = 0; i < n; i++)
+    wait(&status);
+  return ok;
+}
+
+static int
+fullfdtest(void)
+{
+  int ok = 1, fds[NOFILE], n = 0, fd;
+  while(n < NOFILE && (fd = open("README", O_RDONLY)) >= 0)
+    fds[n++] = fd;
+  CHECK(capture(&after), "snapshot with a full descriptor table");
+  struct sysinfo_proc *p = findproc(&after, getpid());
+  CHECK(p && p->nfd == NOFILE, "all NOFILE descriptors are reported");
+  for(int i = 0; i < NOFILE; i++)
+    CHECK(slotof(&after, getpid(), i) >= 0, "every fd maps to an object");
+  CHECK(quiet(&after), "references match descriptors");
+out:
+  for(int i = 0; i < n; i++)
+    close(fds[i]);
+  return ok;
+}
+
+static int
+fullproctest(void)
+{
+  int ok = 1, p[2] = {-1, -1}, n = 0, status;
+  CHECK(capture(&before), "before filling the process table");
+  CHECK(pipe(p) == 0, "pipe");
+  for(;;){
+    int pid = fork();
+    if(pid < 0)
+      break;
+    if(pid == 0){
+      char c;
+      close(p[1]);
+      read(p[0], &c, 1);    // sleep until the parent closes the write end
+      exit(0);
+    }
+    n++;
+  }
+  CHECK(n > 0, "fork works before the table is full");
+  CHECK(childrenasleep(&after), "children asleep");
+  printf("  process table full: %d processes (NPROC=%d), %d open-file objects\n",
+         after.proc_count, NPROC, after.file_count);
+  CHECK(after.proc_count == NPROC, "fork fails only when all NPROC slots are used");
+  CHECK(quiet(&after), "references match descriptors");
+  struct sysinfo_file *rf = findfile(&after, slotof(&after, getpid(), p[0]));
+  CHECK(rf && rf->ref == n + 1 && rf->npids == n + 1,
+        "pipe read end shared by the parent and every child");
+out:
+  if(p[0] >= 0) close(p[0]);
+  if(p[1] >= 0) close(p[1]);
+  for(int i = 0; i < n; i++)
+    if(wait(&status) < 0 || status != 0)
+      ok = 0;
+  if(ok && (!capture(&after) || after.proc_count != before.proc_count)){
+    printf("  process count not restored after wait\n");
+    ok = 0;
+  }
+  return ok;
+}
+
+// Other processes keep opening, closing, forking and exiting while we call
+// sysinfo(): every call must still succeed with a consistent snapshot.
+static int
+busytest(void)
+{
+  int ok = 1, n = 0, status, fails = 0;
+  for(int i = 0; i < 3; i++){
+    int pid = fork();
+    if(pid < 0)
+      break;
+    if(pid == 0){
+      char name[] = "sysinfo.busyX";
+      name[12] = 'a' + i;
+      for(int j = 0; j < 100; j++){
+        int fd = open(name, O_CREATE | O_RDWR);
+        int q[2];
+        if(pipe(q) == 0){
+          close(q[0]);
+          close(q[1]);
+        }
+        int c = fork();
+        if(c == 0)
+          exit(0);
+        if(c > 0)
+          wait(0);
+        if(fd >= 0)
+          close(fd);
+      }
+      unlink(name);
+      exit(0);
+    }
+    n++;
+  }
+  for(int i = 0; i < 300; i++)
+    if(!capture(&after))
+      fails++;
+  for(int i = 0; i < n; i++)
+    if(wait(&status) < 0 || status != 0)
+      ok = 0;
+  if(n != 3){
+    printf("  could not start the busy processes\n");
+    ok = 0;
+  }
+  if(fails){
+    printf("  %d of 300 calls failed while the system was busy\n", fails);
+    ok = 0;
+  }
   return ok;
 }
 
@@ -452,52 +916,43 @@ out:
 static struct {
   char *name;
   int (*run)(void);
-  int needs_collectors;
 } tests[] = {
-  {"01 basic sysinfo", basic, 1},
-  {"02 open", opentest, 1},
-  {"03 dup", duptest, 1},
-  {"04 close", closetest, 1},
-  {"05 fork", forktest, 1},
-  {"06 pipe", pipetest, 1},
-  {"07 exit/zombie/wait", exittest, 1},
-  {"08 scheduling count", scheduletest, 1},
-  {"09 invalid pointers", pointertest, 0},
-  {"10 repeated calls", repeattest, 1},
-  {"11 multiple process references", multiproctest, 1},
-  {"12 trace regression", tracetest, 0},
+  {"01 basic sysinfo", basic},
+  {"02 init and console", inittest},
+  {"03 open", opentest},
+  {"04 dup", duptest},
+  {"05 close", closetest},
+  {"06 pipe", pipetest},
+  {"07 fork", forktest},
+  {"08 multiple process references", multiproctest},
+  {"09 exit/zombie/wait", exittest},
+  {"10 kill sleeping process", killtest},
+  {"11 reparent to init", reparenttest},
+  {"12 scheduling count", scheduletest},
+  {"13 runnable under CPU contention", runnabletest},
+  {"14 full descriptor table", fullfdtest},
+  {"15 full process table", fullproctest},
+  {"16 busy system", busytest},
+  {"17 invalid pointers", pointertest},
+  {"18 repeated calls", repeattest},
+  {"19 trace regression", tracetest},
 };
 
 int
-main(void)
+main(int argc, char *argv[])
 {
-  // LAB_SYSCALL intentionally skips zeroing user pages in uvmalloc().
-  passed = failed = blocked = 0;
-  int available = sysinfo(&after) == 0;
-#ifndef SYSINFO_COLLECTORS_READY
-  if(!available){
-    printf("PENDING_TEAM_INTEGRATION: collectors disabled; data tests BLOCKED\n");
-    memset(&after, 0x5a, sizeof(after));
-    for(int i = 0; i < 20; i++)
-      if(sysinfo(&after) != -1){
-        printf("FAIL: pending syscall returned success\n");
-        exit(1);
-      }
-    for(int i = 0; i < sizeof(after); i++)
-      if(((uchar *)&after)[i] != 0x5a){
-        printf("FAIL: pending syscall modified user buffer\n");
-        exit(1);
-      }
+  // LAB_SYSCALL intentionally skips zeroing user pages in uvmalloc(),
+  // so globals in BSS must be initialized explicitly.
+  passed = failed = 0;
+  if(argc == 2 && strcmp(argv[1], "show") == 0){
+    if(!capture(&after))
+      exit(1);
+    show("sysinfo", &after);
+    exit(0);
   }
-#else
-  // A real collector failure must fail tests, never masquerade as pending work.
-  available = 1;
-#endif
   for(int i = 0; i < sizeof(tests)/sizeof(tests[0]); i++){
-    if(tests[i].needs_collectors && !available){
-      printf("BLOCKED %s: real collectors required\n", tests[i].name);
-      blocked++;
-    } else if(tests[i].run()){
+    printf("== %s\n", tests[i].name);
+    if(tests[i].run()){
       printf("PASS %s\n", tests[i].name);
       passed++;
     } else {
@@ -505,6 +960,6 @@ main(void)
       failed++;
     }
   }
-  printf("sysinfotest: %d PASS, %d FAIL, %d BLOCKED\n", passed, failed, blocked);
-  exit(failed ? 1 : blocked ? 2 : 0);
+  printf("sysinfotest: %d PASS, %d FAIL\n", passed, failed);
+  exit(failed ? 1 : 0);
 }
