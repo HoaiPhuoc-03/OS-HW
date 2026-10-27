@@ -8,6 +8,7 @@ struct spinlock;
 struct sleeplock;
 struct stat;
 struct superblock;
+struct sysinfo;
 
 // bio.c
 void            binit(void);
@@ -132,6 +133,12 @@ char*           safestrcpy(char*, const char*, int);
 int             strlen(const char*);
 int             strncmp(const char*, const char*, uint);
 char*           strncpy(char*, const char*, int);
+
+// sysproc.c: collectors return 0 on success, -1 on failure (see docs/sysinfo.md).
+void            sysinfoinit(void);
+int             collect_file_info(struct sysinfo*);
+int             collect_proc_info(struct sysinfo*);
+int             sysinfo_file_slot(struct file*);
 
 // syscall.c
 void            argint(int, int*);

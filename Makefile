@@ -93,6 +93,11 @@ XCFLAGS += -DSOL_$(LABUPPER) -DLAB_$(LABUPPER)
 endif
 
 CFLAGS += $(XCFLAGS)
+# Enable only after both real collectors satisfy docs/sysinfo.md.
+SYSINFO_COLLECTORS ?= 0
+ifeq ($(SYSINFO_COLLECTORS),1)
+CFLAGS += -DSYSINFO_COLLECTORS_READY
+endif
 CFLAGS += -MD
 CFLAGS += -mcmodel=medany
 # CFLAGS += -ffreestanding -fno-common -nostdlib -mno-relax
@@ -194,13 +199,14 @@ UPROGS=\
 	$U/_grind\
 	$U/_wc\
 	$U/_zombie\
+	$U/_sysinfotest\
+	$U/_trace\
 
 
 
 
 ifeq ($(LAB),syscall)
 UPROGS += \
-	$U/_trace\
 	$U/_attack\
 	$U/_attacktest\
 	$U/_secret
