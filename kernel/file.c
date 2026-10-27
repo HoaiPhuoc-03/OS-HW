@@ -14,6 +14,9 @@
 #include "proc.h"
 #include "sysinfo.h"
 
+// Process table is defined in proc.c; used by collect_file_info().
+extern struct proc proc[NPROC];
+
 struct devsw devsw[NDEV];
 struct {
   struct spinlock lock;
@@ -181,38 +184,58 @@ filewrite(struct file *f, uint64 addr, int n)
   return ret;
 }
 
-// Collect information about open files for sysinfo.
-// dst is the user address of the files array.
+// ---------------------------------------------------------------
+// sysinfo support
+// ---------------------------------------------------------------
+
+// Return the ftable slot index of open-file object f,
+// or -1 if f is null / not in ftable.
+// Used by proc.c to describe each process's open files.
 int
-collect_fileinfo(pagetable_t pagetable, uint64 dst)
+sysinfo_file_slot(struct file *f)
 {
-  int nfiles = 0;
+  if(f < ftable.file || f >= ftable.file + NFILE)
+    return -1;
+  return (int)(f - ftable.file);
+}
 
-  for(int i = 0; i < NFILE; i++){
+// Fill si->nfiles and si->files[] with every open-file object
+// (ref > 0), including the PIDs that reference each one.
+// si must be a kernel buffer; the caller (sys_sysinfo) copies it
+// out to user space. Returns the number of open files found.
+//
+// Lock order: ftable.lock and p->lock are never held together.
+// f->ref is not modified, so sysinfo has no side effect on the system.
+int
+collect_file_info(struct sysinfo *si)
+{
+  int n = 0;
+
+  for(int i = 0; i < NFILE && n < SYSINFO_MAX_FILES; i++){
     struct file *f = &ftable.file[i];
-    struct fileinfo info;
+    struct fileinfo *fi = &si->files[n];
 
-    if(nfiles >= SYSINFO_MAX_FILES)
-      break;
+    memset(fi, 0, sizeof(*fi));
 
-    memset(&info, 0, sizeof(info));
-
+    // Snapshot the file's metadata under ftable.lock.
     acquire(&ftable.lock);
     if(f->ref == 0){
       release(&ftable.lock);
       continue;
     }
-    info.id = i;
-    info.type = f->type;
-    info.readable = f->readable;
-    info.writable = f->writable;
-    info.ref = f->ref;
-    f->ref++;                       
+    fi->id = i;
+    fi->type = f->type;
+    fi->readable = f->readable;
+    fi->writable = f->writable;
+    fi->ref = f->ref;
     release(&ftable.lock);
 
+    // Find processes that hold this file in their fd table.
+    // Only the pointer value is compared; f is never dereferenced here.
     for(int j = 0; j < NPROC; j++){
       struct proc *p = &proc[j];
-      int found = 0, pid = -1;
+      int found = 0;
+      int pid = 0;
 
       acquire(&p->lock);
       if(p->state != UNUSED){
@@ -226,17 +249,15 @@ collect_fileinfo(pagetable_t pagetable, uint64 dst)
       }
       release(&p->lock);
 
-      if(found && info.npids < SYSINFO_MAX_PIDS)
-        info.pids[info.npids++] = pid;   
+      if(found){
+        if(fi->npids < SYSINFO_MAX_PIDS)
+          fi->pids[fi->npids] = pid;
+        fi->npids++;   // keep counting even if the list is full
+      }
     }
-
-    uint64 addr = dst + (uint64)nfiles * sizeof(struct fileinfo);
-    if(copyout(pagetable, addr, (char *)&info, sizeof(info)) < 0){
-      fileclose(f);
-      return -1;
-    }
-    nfiles++;
-    fileclose(f);         
+    n++;
   }
-  return nfiles;
+
+  si->nfiles = n;
+  return n;
 }
