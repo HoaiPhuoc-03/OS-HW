@@ -1,39 +1,47 @@
-#ifndef SYSINFO_H
-#define SYSINFO_H
+#ifndef XV6_SYSINFO_H
+#define XV6_SYSINFO_H
 
+#include "types.h"
+#include "param.h"
 
-#define SYSINFO_MAX_FILES 100  
-#define SYSINFO_MAX_PROCS 64   
-#define SYSINFO_MAX_PIDS  8     
-#define SYSINFO_MAX_FDS   16    
+#define SYSINFO_READ  1
+#define SYSINFO_WRITE 2
 
-// Information about one open-file object (an ftable.file[] slot with ref > 0).
-struct fileinfo {
-  int id;                        
-  int type;                     
-  int readable;                  
-  int writable;                 
-  int ref;                       
-  int npids;                     
-  int pids[SYSINFO_MAX_PIDS];   
+// Shared ABI values; never expose struct file or struct proc to user space.
+enum sysinfo_type { SYSINFO_NONE, SYSINFO_PIPE, SYSINFO_INODE, SYSINFO_DEVICE };
+enum sysinfo_state {
+  SYSINFO_UNUSED, SYSINFO_USED, SYSINFO_SLEEPING,
+  SYSINFO_RUNNABLE, SYSINFO_RUNNING, SYSINFO_ZOMBIE
 };
 
-// Information about one process whose state is not UNUSED.
-struct procinfo {
+struct sysinfo_fd {
+  int fd;
+  int file_slot;              // index in ftable.file[], not a user descriptor
+};
+
+struct sysinfo_file {
+  int slot;
+  int type;
+  int mode;                   // SYSINFO_READ | SYSINFO_WRITE, not open() flags
+  int ref;
+  int npids;
+  int pids[NPROC];            // each PID appears at most once
+};
+
+struct sysinfo_proc {
   int pid;
-  int state;                      
-  int ppid;                       
-  int sched_count;               
-  int nfds;                       
-  int fds[SYSINFO_MAX_FDS];     
+  int state;
+  int ppid;                   // 0 if there is no parent
+  int nfd;
+  uint64 schedule_count;
+  struct sysinfo_fd fds[NOFILE];
 };
 
-// Result of the sysinfo system call.
 struct sysinfo {
-  int nfiles;                                
-  int nprocs;                                 
-  struct fileinfo files[SYSINFO_MAX_FILES];   
-  struct procinfo procs[SYSINFO_MAX_PROCS];   
+  int file_count;
+  int proc_count;
+  struct sysinfo_file files[NFILE]; // packed entries, identified by .slot
+  struct sysinfo_proc procs[NPROC];
 };
 
 #endif
