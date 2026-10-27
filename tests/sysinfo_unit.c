@@ -77,7 +77,14 @@ main(void)
   REJECT(fixture.procs[0].fds[0].fd = NOFILE);
   REJECT(fixture.procs[0].fds[1].fd = 0);
   REJECT(fixture.procs[0].fds[0].file_slot = -1);
-  REJECT(fixture.procs[0].fds[0].file_slot = 8); // valid slot, missing object
+  // A descriptor whose object is missing from the snapshot (opened or
+  // released between the two collectors) is dropped, not rejected.
+  reset();
+  fixture.procs[0].fds[0].file_slot = 8;
+  VERIFY(sysinfo_link(&fixture) == 0);
+  VERIFY(fixture.procs[0].nfd == 1 && fixture.procs[0].fds[0].fd == 1);
+  VERIFY(fixture.procs[0].fds[1].fd == 0 && fixture.procs[0].fds[1].file_slot == 0);
+  VERIFY(fixture.files[0].npids == 2);
 
   struct proc p;
   memset(&p, 0, sizeof(p));

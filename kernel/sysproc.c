@@ -40,22 +40,22 @@ sysinfo_user_buffer(struct proc *p, uint64 addr)
   return 0;
 }
 
+// Fill the snapshot from both source tables. Each collector takes and
+// releases its own locks, so no spinlock is held between the two calls.
 static int
 sysinfo_collect(struct sysinfo *info)
 {
-#ifdef SYSINFO_COLLECTORS_READY
   if(collect_file_info(info) != 0 || collect_proc_info(info) != 0)
     return -1;
   return 0;
-#else
-  // PENDING_TEAM_INTEGRATION: no fake or empty successful snapshot.
-  (void)info;
-  return -1;
-#endif
 }
 
 // Validate packed collector output and derive unique file -> PID links.
-// This detects structural mismatches, not slot reuse between two observations.
+// The file table is sampled before the process table, so a descriptor may
+// name an object that was opened or released in between (open(), or exit()
+// which closes files before clearing ofile[]). Such a descriptor is dropped
+// instead of failing the whole call; the snapshot stays self-consistent.
+// Slot reuse between the two observations is not detected.
 static int
 sysinfo_link(struct sysinfo *info)
 {
@@ -82,20 +82,21 @@ sysinfo_link(struct sysinfo *info)
     for(int j = 0; j < i; j++)
       if(info->procs[j].pid == p->pid)
         return -1;
+    int kept = 0;
     for(int j = 0; j < p->nfd; j++){
-      struct sysinfo_fd *fd = &p->fds[j];
-      if(fd->fd < 0 || fd->fd >= NOFILE ||
-         fd->file_slot < 0 || fd->file_slot >= NFILE)
+      struct sysinfo_fd fd = p->fds[j];
+      if(fd.fd < 0 || fd.fd >= NOFILE ||
+         fd.file_slot < 0 || fd.file_slot >= NFILE)
         return -1;
-      for(int k = 0; k < j; k++)
-        if(p->fds[k].fd == fd->fd)
+      for(int k = 0; k < kept; k++)
+        if(p->fds[k].fd == fd.fd)
           return -1;
       int k;
       for(k = 0; k < info->file_count; k++)
-        if(info->files[k].slot == fd->file_slot)
+        if(info->files[k].slot == fd.file_slot)
           break;
       if(k == info->file_count)
-        return -1;
+        continue;   // object not in this snapshot: drop the descriptor
       struct sysinfo_file *f = &info->files[k];
       int n;
       for(n = 0; n < f->npids; n++)
@@ -106,7 +107,10 @@ sysinfo_link(struct sysinfo *info)
           return -1;
         f->pids[f->npids++] = p->pid;
       }
+      p->fds[kept++] = fd;
     }
+    memset(&p->fds[kept], 0, (p->nfd - kept) * sizeof(p->fds[0]));
+    p->nfd = kept;
   }
   return 0;
 }
