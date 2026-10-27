@@ -94,11 +94,6 @@ XCFLAGS += -DSOL_$(LABUPPER) -DLAB_$(LABUPPER)
 endif
 
 CFLAGS += $(XCFLAGS)
-# Enable only after both real collectors satisfy docs/sysinfo.md.
-SYSINFO_COLLECTORS ?= 1
-ifeq ($(SYSINFO_COLLECTORS),1)
-CFLAGS += -DSYSINFO_COLLECTORS_READY
-endif
 CFLAGS += -MD
 CFLAGS += -mcmodel=medany
 # CFLAGS += -ffreestanding -fno-common -nostdlib -mno-relax

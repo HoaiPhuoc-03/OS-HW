@@ -109,6 +109,7 @@ void            yield(void);
 int             either_copyout(int user_dst, uint64 dst, void *src, uint64 len);
 int             either_copyin(void *dst, int user_src, uint64 src, uint64 len);
 void            procdump(void);
+int             collect_proc_info(struct sysinfo*);
 
 // swtch.S
 void            swtch(struct context*, struct context*);
@@ -136,11 +137,8 @@ int             strlen(const char*);
 int             strncmp(const char*, const char*, uint);
 char*           strncpy(char*, const char*, int);
 
-// sysproc.c: collectors return 0 on success, -1 on failure (see docs/sysinfo.md).
+// sysproc.c
 void            sysinfoinit(void);
-int             collect_file_info(struct sysinfo*);
-int             collect_proc_info(struct sysinfo*);
-int             sysinfo_file_slot(struct file*);
 
 // syscall.c
 void            argint(int, int*);
