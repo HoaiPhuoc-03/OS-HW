@@ -95,7 +95,7 @@ endif
 
 CFLAGS += $(XCFLAGS)
 # Enable only after both real collectors satisfy docs/sysinfo.md.
-SYSINFO_COLLECTORS ?= 0
+SYSINFO_COLLECTORS ?= 1
 ifeq ($(SYSINFO_COLLECTORS),1)
 CFLAGS += -DSYSINFO_COLLECTORS_READY
 endif
