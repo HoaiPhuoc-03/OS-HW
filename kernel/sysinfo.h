@@ -1,21 +1,39 @@
-// Thông tin của một đối tượng file đang được tham chiếu.
+#ifndef SYSINFO_H
+#define SYSINFO_H
+
+
+#define SYSINFO_MAX_FILES 100  
+#define SYSINFO_MAX_PROCS 64   
+#define SYSINFO_MAX_PIDS  8     
+#define SYSINFO_MAX_FDS   16    
+
+// Information about one open-file object (an ftable.file[] slot with ref > 0).
 struct fileinfo {
-  int id;                         // Slot index trong ftable.file[]
-  int type;                       // FD_PIPE, FD_INODE, FD_DEVICE
-  int readable;                   // Có quyền đọc không?
-  int writable;                   // Có quyền ghi không?
-  int ref;                        // Số tham chiếu của kernel
-  int npids;                      // Số PID khác nhau tham chiếu file
-  int pids[SYSINFO_MAX_PIDS];     // Danh sách PID
+  int id;                        
+  int type;                     
+  int readable;                  
+  int writable;                 
+  int ref;                       
+  int npids;                     
+  int pids[SYSINFO_MAX_PIDS];   
 };
 
-// Thông tin hệ thống trả về từ syscall sysinfo.
-struct sysinfo {
-  uint64 freemem;                 // Bộ nhớ trống (bytes)
-  uint64 nproc;                   // Số process đang hoạt động
+// Information about one process whose state is not UNUSED.
+struct procinfo {
+  int pid;
+  int state;                      
+  int ppid;                       
+  int sched_count;               
+  int nfds;                       
+  int fds[SYSINFO_MAX_FDS];     
+};
 
-  int nfiles;                     // Số đối tượng file được ghi
-  struct fileinfo files[SYSINFO_MAX_FILES];
+// Result of the sysinfo system call.
+struct sysinfo {
+  int nfiles;                                
+  int nprocs;                                 
+  struct fileinfo files[SYSINFO_MAX_FILES];   
+  struct procinfo procs[SYSINFO_MAX_PROCS];   
 };
 
 #endif

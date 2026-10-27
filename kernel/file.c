@@ -12,6 +12,7 @@
 #include "file.h"
 #include "stat.h"
 #include "proc.h"
+#include "sysinfo.h"
 
 struct devsw devsw[NDEV];
 struct {
@@ -180,3 +181,62 @@ filewrite(struct file *f, uint64 addr, int n)
   return ret;
 }
 
+// Collect information about open files for sysinfo.
+// dst is the user address of the files array.
+int
+collect_fileinfo(pagetable_t pagetable, uint64 dst)
+{
+  int nfiles = 0;
+
+  for(int i = 0; i < NFILE; i++){
+    struct file *f = &ftable.file[i];
+    struct fileinfo info;
+
+    if(nfiles >= SYSINFO_MAX_FILES)
+      break;
+
+    memset(&info, 0, sizeof(info));
+
+    acquire(&ftable.lock);
+    if(f->ref == 0){
+      release(&ftable.lock);
+      continue;
+    }
+    info.id = i;
+    info.type = f->type;
+    info.readable = f->readable;
+    info.writable = f->writable;
+    info.ref = f->ref;
+    f->ref++;                       
+    release(&ftable.lock);
+
+    for(int j = 0; j < NPROC; j++){
+      struct proc *p = &proc[j];
+      int found = 0, pid = -1;
+
+      acquire(&p->lock);
+      if(p->state != UNUSED){
+        pid = p->pid;
+        for(int fd = 0; fd < NOFILE; fd++){
+          if(p->ofile[fd] == f){
+            found = 1;
+            break;
+          }
+        }
+      }
+      release(&p->lock);
+
+      if(found && info.npids < SYSINFO_MAX_PIDS)
+        info.pids[info.npids++] = pid;   
+    }
+
+    uint64 addr = dst + (uint64)nfiles * sizeof(struct fileinfo);
+    if(copyout(pagetable, addr, (char *)&info, sizeof(info)) < 0){
+      fileclose(f);
+      return -1;
+    }
+    nfiles++;
+    fileclose(f);         
+  }
+  return nfiles;
+}
