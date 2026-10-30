@@ -147,6 +147,10 @@ main(int argc, char *argv[])
     if(shortname[0] == '_')
       shortname += 1;
 
+    // Keep the xv6 README name used by user programs and tests.
+    if(strcmp(shortname, "README.md") == 0)
+      shortname = "README";
+
     assert(strlen(shortname) <= DIRSIZ);
     
     inum = ialloc(T_FILE);
