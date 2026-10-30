@@ -1,59 +1,62 @@
-# Project 0 - System Call Tracing
+# Lab 1 - File & Process Management
 
-This repository contains an xv6 RISC-V implementation of the `trace` system
-call exercise. The `trace` user program runs another program with syscall
-tracing enabled.
+Cài đặt syscall `int sysinfo(struct sysinfo *)` trên xv6 RISC-V để thu thập:
 
-## Requirements
+- File đang mở toàn hệ thống: slot, type, mode, reference count và các PID tham chiếu.
+- Process có `state != UNUSED`: PID, trạng thái, PID cha, số lần được lập lịch
+  và danh sách file đang mở.
 
-- RISC-V GNU toolchain (`riscv64-unknown-elf-*` or `riscv64-linux-gnu-*`)
-- QEMU with RISC-V support (`qemu-system-riscv64`)
-- `make`
+`fd` là chỉ số trong bảng file của từng process; `slot` là chỉ số open-file
+object trong bảng file toàn hệ thống. Nhiều fd có thể cùng trỏ tới một slot.
 
-## Build and run
+## Môi trường và chạy
 
-From the repository root, run:
+Cần Linux, `make`, RISC-V GNU toolchain (`riscv64-unknown-elf-*` hoặc
+`riscv64-linux-gnu-*`) và `qemu-system-riscv64`.
+
+Chạy tại thư mục gốc dự án:
+
+```sh
+make qemu          # mặc định 3 CPU
+# Hoặc: make qemu CPUS=1
+```
+
+Thoát QEMU: nhấn `Ctrl+A`, thả phím, rồi nhấn `X`.
+
+## Kiểm thử
+
+Tại dấu nhắc `$` của xv6:
+
+```sh
+sysinfotest
+sysinfotest show
+trace 8388608 sysinfotest show
+```
+
+Lần lượt: chạy toàn bộ test, in snapshot hiện tại, và in snapshot kèm trace
+riêng syscall `sysinfo` (số 23).
+
+Các test bao gồm open/dup/close, pipe, fork/exit/wait, trạng thái process,
+lập lịch, đầy bảng fd/process, tải đồng thời và con trỏ không hợp lệ.
+Kết quả đã kiểm chứng: `19 PASS, 0 FAIL` trên 1, 3 và 8 CPU;
+host unit test đạt 41 checks, 0 failures.
+
+## Mã nguồn và giới hạn
+
+- `kernel/sysinfo.h`: cấu trúc dữ liệu dùng chung giữa kernel và user.
+- `kernel/sysproc.c`: xử lý syscall; `kernel/file.c`, `kernel/proc.c`: thu thập dữ liệu.
+- `user/sysinfotest.c`: chương trình kiểm thử và in kết quả.
+- `docs/sysinfo.md`: thiết kế, khóa và hướng dẫn chạy host unit test.
+
+Snapshot được thu thập theo từng bảng, không nguyên tử. Khi các process
+mở/đóng file đồng thời, thông tin có thể thiếu hoặc ghép sai nếu slot được
+tái sử dụng giữa hai lượt thu thập.
+
+## Dọn trước khi đóng gói
 
 ```sh
 make clean
-make qemu
 ```
 
-When xv6 starts, use its `$` prompt to run the tests below. To exit QEMU, press
-Ctrl+A, release the keys, then press X.
-
-## Test `trace`
-
-Trace only `read` (syscall number 5, so the mask is `1 << 5`, or `32`):
-
-```sh
-trace 32 grep README user/trace.c
-```
-
-The output should contain `syscall read -> ...` lines.
-
-Trace all syscalls:
-
-```sh
-trace 2147483647 grep README user/trace.c
-```
-
-The output should include calls such as `trace`, `exec`, `open`, `read`, and
-`close`. A command run without `trace` should not print trace lines:
-
-```sh
-grep README user/trace.c
-```
-
-Calling `trace` without a command prints its usage:
-
-```sh
-trace 32
-```
-
-## Implementation
-
-The syscall mask is stored per process. `trace` sets the mask before executing
-the requested command; the kernel prints the syscall name and return value for
-selected calls. Child processes inherit their parent's mask, while newly
-allocated process slots start with tracing disabled.
+Đóng gói source sau bước này; chạy lại `make` sẽ sinh lại file build.
+Lưu ý: quy tắc `clean` cũng xóa các file `*.zip` ở thư mục gốc dự án.
