@@ -63,6 +63,7 @@ vprintf(int fd, const char *fmt, va_list ap)
       } else {
         putc(fd, c0);
       }
+
     } else if(state == '%'){
       c1 = c2 = 0;
       if(c0) c1 = fmt[i+1] & 0xff;
