@@ -351,7 +351,8 @@ uvmcopy(pagetable_t old, pagetable_t new, uint64 sz)
     if((*pte & PTE_V) == 0)
       panic("uvmcopy: page not present");
     pa = PTE2PA(*pte);
-    flags = PTE_FLAGS(*pte);
+    // The child's PTE starts with its own access history.
+    flags = PTE_FLAGS(*pte) & ~PTE_A;
     if((mem = kalloc()) == 0)
       goto err;
     memmove(mem, (char*)pa, PGSIZE);
@@ -378,6 +379,51 @@ uvmclear(pagetable_t pagetable, uint64 va)
   if(pte == 0)
     panic("uvmclear");
   *pte &= ~PTE_U;
+}
+
+// Report and clear access bits in the calling process's page table.
+int
+pgaccess(pagetable_t pagetable, uint64 start, int npages, uint64 dst)
+{
+  uint mask = 0;
+  pte_t *pages[8 * sizeof(mask)];
+  uint64 first = PGROUNDDOWN(start);
+  const uint user_page = PTE_V | PTE_U;
+  const uint writable = user_page | PTE_W;
+
+  if(npages <= 0 || npages > (int)NELEM(pages) || start >= MAXVA ||
+     (uint64)npages > (MAXVA - first) / PGSIZE)
+    return -1;
+  if(dst == 0 || dst >= MAXVA || sizeof(mask) > MAXVA - dst)
+    return -1;
+
+  // Check the entire output buffer so copyout cannot write a partial mask.
+  uint64 last = PGROUNDDOWN(dst + sizeof(mask) - 1);
+  for(uint64 va = PGROUNDDOWN(dst); va <= last; va += PGSIZE){
+    pte_t *pte = walk(pagetable, va, 0);
+    if(pte == 0 || (*pte & writable) != writable)
+      return -1;
+  }
+
+  for(int i = 0; i < npages; i++){
+    pte_t *pte = walk(pagetable, first + (uint64)i * PGSIZE, 0);
+    if(pte == 0 || (*pte & user_page) != user_page ||
+       (*pte & (PTE_R | PTE_X)) == 0)
+      return -1;
+    pages[i] = pte;
+    if(*pte & PTE_A)
+      mask |= 1U << i;
+  }
+
+  if(copyout(pagetable, dst, (char *)&mask, sizeof(mask)) < 0)
+    return -1;
+
+  // userret flushes the TLB when it reinstalls this page table in satp.
+  for(int i = 0; i < npages; i++){
+    if(mask & (1U << i))
+      *pages[i] &= ~PTE_A;
+  }
+  return 0;
 }
 
 // Copy from kernel to user.
