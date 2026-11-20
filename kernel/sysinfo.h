@@ -42,6 +42,7 @@ struct sysinfo {
   int proc_count;
   struct sysinfo_file files[NFILE]; // packed entries, identified by .slot
   struct sysinfo_proc procs[NPROC];
+  uint64 free_memory_bytes;         // free physical pages, in bytes
 };
 
 #endif

@@ -49,7 +49,8 @@ reset(void)
 int
 main(void)
 {
-  VERIFY(sizeof(struct sysinfo) == 37336);
+  VERIFY(sizeof(struct sysinfo) == 37344);
+  VERIFY(__builtin_offsetof(struct sysinfo, free_memory_bytes) == 37336);
   VERIFY(__alignof__(struct sysinfo) == 8);
   VERIFY(__builtin_offsetof(struct sysinfo, procs) == 27608);
   VERIFY(__builtin_offsetof(struct sysinfo_proc, schedule_count) == 16);
@@ -96,6 +97,18 @@ main(void)
   VERIFY(sysinfo_user_buffer(&p, p.sz - sizeof(snapshot) + 1) == -1);
   VERIFY(sysinfo_user_buffer(&p, MAXVA) == -1);
   VERIFY(sysinfo_user_buffer(&p, ~(uint64)0) == -1);
+  // An old-sized destination must now fail; an exact new-sized one is valid.
+  uint64 saved_size = p.sz;
+  p.sz = PGSIZE + 37336;
+  VERIFY(sysinfo_user_buffer(&p, PGSIZE) == -1);
+  p.sz = PGSIZE + sizeof(snapshot);
+  VERIFY(sysinfo_user_buffer(&p, PGSIZE) == 0);
+  p.sz = saved_size;
+  // Only the appended field crosses into page 10: preflight must check it.
+  pages[10] &= ~PTE_W;
+  VERIFY(sysinfo_user_buffer(&p, 10 * PGSIZE - 37336) == -1);
+  pages[10] |= PTE_W;
+  VERIFY(sysinfo_user_buffer(&p, 10 * PGSIZE - 37336) == 0);
   pages[5] &= ~PTE_W;
   VERIFY(sysinfo_user_buffer(&p, PGSIZE + 3) == -1);
   pages[5] = PTE_V | PTE_W; // guard page

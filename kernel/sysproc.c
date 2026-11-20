@@ -129,8 +129,12 @@ sys_sysinfo(void)
   // Serializes this storage only; source tables still need their own locks.
   acquiresleep(&sysinfo_lock);
   memset(&snapshot, 0, sizeof(snapshot));
-  if(sysinfo_collect(&snapshot) == 0 && sysinfo_link(&snapshot) == 0)
+  if(sysinfo_collect(&snapshot) == 0 && sysinfo_link(&snapshot) == 0){
+    // Collectors have released their locks; freemem releases kmem.lock
+    // before copyout. The three sources are sampled at separate times.
+    snapshot.free_memory_bytes = freemem();
     result = copyout(p->pagetable, addr, (char *)&snapshot, sizeof(snapshot));
+  }
   releasesleep(&sysinfo_lock);
   return result;
 }

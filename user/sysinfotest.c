@@ -5,6 +5,7 @@
 //                      e.g. "cat README | sysinfotest show")
 #include "kernel/types.h"
 #include "kernel/riscv.h"
+#include "kernel/memlayout.h"
 #include "kernel/fcntl.h"
 #include "kernel/syscall.h"
 #include "kernel/sysinfo.h"
@@ -82,6 +83,7 @@ static void
 show(char *title, struct sysinfo *s)
 {
   printf("  --- %s ---\n", title);
+  printf("  free memory: %lu bytes\n", s->free_memory_bytes);
   printf("  open-file objects: %d\n", s->file_count);
   printf("    slot type    mode ref  pids\n");
   for(int i = 0; i < s->file_count; i++){
@@ -154,6 +156,9 @@ haspid(struct sysinfo_file *f, int pid)
 static int
 valid(struct sysinfo *s)
 {
+  if(s->free_memory_bytes % PGSIZE != 0 ||
+     s->free_memory_bytes > PHYSTOP - KERNBASE)
+    return 0;
   if(s->file_count < 0 || s->file_count > NFILE ||
      s->proc_count < 1 || s->proc_count > NPROC)
     return 0;
@@ -913,6 +918,67 @@ out:
   return ok;
 }
 
+// Memory deltas are meaningful in the quiet test environment: init and the
+// shell sleep while this foreground test runs, and earlier children are reaped.
+static int
+memoryquiet(struct sysinfo *s)
+{
+  int me = getpid();
+  for(int i = 0; i < s->proc_count; i++)
+    if(s->procs[i].pid != me && s->procs[i].state != SYSINFO_SLEEPING)
+      return 0;
+  return 1;
+}
+
+static int
+freememorytest(void)
+{
+  int ok = 1, grown = 0;
+  char *base = sbrk(0);
+  int padding = PGROUNDUP((uint64)base) - (uint64)base;
+  int amount = padding + 4 * PGSIZE;
+  uint64 m0 = 0, m1 = 0, m2 = 0;
+
+  CHECK(base != (char *)-1, "read initial program break");
+  CHECK(capture(&before) && memoryquiet(&before), "quiet memory baseline");
+  m0 = before.free_memory_bytes;
+  CHECK(m0 > 0, "free physical memory is nonzero");
+  CHECK(sbrk(amount) == base, "allocate four aligned heap pages");
+  grown = amount;
+  // Touch every requested page, also exercising the returned writable memory.
+  for(int i = padding; i < amount; i += PGSIZE)
+    *(volatile char *)(base + i) = 0x5a;
+  CHECK(capture(&after) && memoryquiet(&after), "snapshot after allocation");
+  m1 = after.free_memory_bytes;
+  // Page-table allocation may consume extra pages: do not require equality.
+  CHECK(m1 < m0 && m0 - m1 >= 4 * PGSIZE,
+        "allocating pages reduces free physical memory");
+  CHECK(sbrk(-grown) == base + grown, "release heap pages and padding");
+  grown = 0;
+  CHECK(sbrk(0) == base, "program break restored exactly");
+  CHECK(capture(&after) && memoryquiet(&after), "snapshot after free");
+  m2 = after.free_memory_bytes;
+  CHECK(m2 > m1 && m2 - m1 >= 4 * PGSIZE,
+        "freeing heap pages restores free physical memory");
+  // Use the post-free baseline: deallocation can retain page-table pages.
+  for(int i = 0; i < 50; i++){
+    CHECK(capture(&after) && memoryquiet(&after), "repeated quiet snapshot");
+    CHECK(after.free_memory_bytes == m2, "sysinfo does not leak physical pages");
+  }
+  printf("  free memory: before=%lu, allocated=%lu, freed=%lu bytes\n",
+         m0, m1, m2);
+out:
+  if(grown && sbrk(-grown) == (char *)-1){
+    printf("  failed to restore heap after memory test\n");
+    ok = 0;
+  }
+  if(base != (char *)-1 && sbrk(0) != base){
+    printf("  memory test changed the program break\n");
+    ok = 0;
+  }
+  return ok;
+}
+
 static struct {
   char *name;
   int (*run)(void);
@@ -936,6 +1002,7 @@ static struct {
   {"17 invalid pointers", pointertest},
   {"18 repeated calls", repeattest},
   {"19 trace regression", tracetest},
+  {"20 free memory", freememorytest},
 };
 
 int

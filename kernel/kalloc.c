@@ -91,3 +91,16 @@ kalloc(void)
   return (void*)r;
 }
 
+// Count physical bytes available to the allocator without changing the list.
+uint64
+freemem(void)
+{
+  uint64 bytes = 0;
+
+  acquire(&kmem.lock);
+  for(struct run *r = kmem.freelist; r != 0; r = r->next)
+    bytes += PGSIZE;
+  release(&kmem.lock);
+
+  return bytes;
+}
