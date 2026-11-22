@@ -474,6 +474,17 @@ sys_exec(void)
   return -1;
 }
 
+// exec có in page table của tiến trình sau khi exec thành công.
+// sys_exec() ở trên không bị thay đổi nên exec thường vẫn chạy như cũ.
+uint64
+sys_execp(void)
+{
+  uint64 ret = sys_exec();
+  if((int)ret >= 0)                 // exec thành công: p->pagetable là bảng mới
+    vmprint(myproc()->pagetable);
+  return ret;
+}
+
 uint64
 sys_pipe(void)
 {
