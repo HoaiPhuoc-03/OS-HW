@@ -541,11 +541,8 @@ vmprint_rec(pagetable_t pt, int level)
     pte_t pte = pt[i];
     if(!(pte & PTE_V))
       continue;
-    for(int d = 0; d <= level; d++){
-      if(d > 0)
-        printf(" ");
-      printf("..");
-    }
+    for(int d = 0; d <= level; d++)
+      printf(" ..");
     printf("%d: pte %p pa %p\n", i, (void *)pte, (void *)PTE2PA(pte));
     // non-leaf: không có R/W/X -> trỏ xuống page-table cấp dưới
     if((pte & (PTE_R|PTE_W|PTE_X)) == 0)
