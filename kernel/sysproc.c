@@ -140,6 +140,18 @@ sys_sysinfo(void)
 }
 
 uint64
+sys_pgaccess(void)
+{
+  uint64 start, mask;
+  int npages;
+
+  argaddr(0, &start);
+  argint(1, &npages);
+  argaddr(2, &mask);
+  return pgaccess(myproc()->pagetable, start, npages, mask);
+}
+
+uint64
 sys_exit(void)
 {
   int n;

@@ -33,6 +33,8 @@ expect_mask(void *addr, int npages, uint expected, const char *name)
 int
 main(void)
 {
+  // LAB_SYSCALL may reuse user pages without zeroing BSS.
+  checks = failures = 0;
   uint64 oldbreak = (uint64)sbrk(0);
   char *base = (char *)PGROUNDUP(oldbreak);
   int size = (uint64)base - oldbreak + NPAGES * PGSIZE;

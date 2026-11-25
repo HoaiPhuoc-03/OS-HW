@@ -540,7 +540,7 @@ vmprint_rec(pagetable_t pt, int level)
   for(int i = 0; i < 512; i++){
     pte_t pte = pt[i];
     if(!(pte & PTE_V))
-      continue;                          
+      continue;
     for(int d = 0; d <= level; d++){
       if(d > 0)
         printf(" ");

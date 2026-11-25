@@ -26,6 +26,7 @@ int uptime(void);
 int trace(int);
 int sysinfo(struct sysinfo *);
 int execp(const char*, char**);
+int pgaccess(const void *start, int npages, void *mask);
 
 // ulib.c
 int stat(const char*, struct stat*);

@@ -198,6 +198,7 @@ UPROGS=\
 	$U/_sysinfotest\
 	$U/_trace\
 	$U/_vmprinttest\
+	$U/_pgaccesstest\
 
 
 
