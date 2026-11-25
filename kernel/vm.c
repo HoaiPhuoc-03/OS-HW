@@ -487,12 +487,32 @@ copyinstr(pagetable_t pagetable, char *dst, uint64 srcva, uint64 max)
 }
 
 
-#ifdef LAB_PGTBL
-void
-vmprint(pagetable_t pagetable) {
-  // your code here
+// In đệ quy một page-table page. level = 0 là cấp cao nhất (root).
+static void
+vmprint_rec(pagetable_t pt, int level)
+{
+  for(int i = 0; i < 512; i++){
+    pte_t pte = pt[i];
+    if(!(pte & PTE_V))
+      continue;                          
+    for(int d = 0; d <= level; d++){
+      if(d > 0)
+        printf(" ");
+      printf("..");
+    }
+    printf("%d: pte %p pa %p\n", i, (void *)pte, (void *)PTE2PA(pte));
+    // non-leaf: không có R/W/X -> trỏ xuống page-table cấp dưới
+    if((pte & (PTE_R|PTE_W|PTE_X)) == 0)
+      vmprint_rec((pagetable_t)PTE2PA(pte), level + 1);
+  }
 }
-#endif
+
+void
+vmprint(pagetable_t pagetable)
+{
+  printf("page table %p\n", (void *)pagetable);
+  vmprint_rec(pagetable, 0);
+}
 
 
 
